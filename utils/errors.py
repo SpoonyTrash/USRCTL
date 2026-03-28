@@ -36,3 +36,30 @@ class UsrctlError(Exception):
 
     return payload
   
+class ValidationError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="VALIDATION_ERROR", **kwargs)
+
+class InsufficientPermissionsError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="INSUFFICIENT_PERMISSIONS", **kwargs)
+
+class ConfigurationError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="CONFIGURATION_ERROR", **kwargs)
+
+class ResourceNotFoundError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="RESOURCE_NOT_FOUND", **kwargs)
+
+class ConflictError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="CONFLICT_ERROR", **kwargs)
+
+class PreventiveSecurityError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="PREVENTIVE_SECURITY_ERROR", **kwargs)
+
+class CommandExecutionError(UsrctlError):
+  def __init__(self, message: str, **kwargs: Any) -> None:
+    super().__init__(message, error_code="COMMAND_EXECUTION_ERROR", **kwargs)
