@@ -14,7 +14,7 @@ EXIT_CODE_SECURITY = 6
 EXIT_CODE_COMMAND = 7
 
 class UsrCtlError(Exception):
-    message: ClassVar[str] = "Se produjo un error en usrctl."
+    message: ClassVar[str] = "An error occurred in usrctl."
     error_code: ClassVar[str] = "USRCTL_ERROR"
     exit_code: ClassVar[int] = EXIT_CODE_GENERAL
     
@@ -39,6 +39,18 @@ class UsrCtlError(Exception):
         super().__init__(self.message)
         if self.cause is not None and self.__cause__ is None:
             self.__cause__ = self.cause
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "message": self.message,
+            "error_code": self.error_code,
+            "hint": self.hint,
+            "details": dict(self.details),
+            "exit_code": self.exit_code
+        }
+        if self.cause is not None:
+            payload["cause"] = str(self.cause)
+        return payload
 
 class ValidationError(UsrCtlError):
     message = "Invalid or inconsistent entry."
