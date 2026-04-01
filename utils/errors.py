@@ -101,6 +101,7 @@ class InvalidUidError(UserError):
 class HomeDirectoryError(UserError):
     message = "Error in the operation on the home directory."
     error_code = "HOME_DIRECTORY_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class InvalidShellError(UserError):
     message = "Invalid, disallowed, or unsafe shell."
@@ -110,6 +111,7 @@ class InvalidShellError(UserError):
 class AccountLockError(UserError):
     message = "Error blocking or unlocking the account."
     error_code = "ACCOUNT_LOCK_ERROR"
+    exit_code = EXIT_CODE_SECURITY
 
 class GroupError(UsrCtlError):
     message = "Error in group management."
@@ -155,6 +157,7 @@ class PasswordGenerationError(PasswordError):
 class PasswordChangeError(PasswordError):
     message = "It was not possible to change the password."
     error_code = "PASSWORD_CHANGE_ERROR"
+    exit_code = EXIT_CODE_SECURITY
 
 class ForcePasswordChangeError(PasswordError):
     message = "It was not possible to force a password change on the next login."
@@ -256,6 +259,7 @@ class BackupError(UsrCtlError):
 class BackupCreationError(BackupError):
     message = "It was not possible to create the backup."
     error_code = "BACKUP_CREATION_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class BackupVersioningError(BackupError):
     message = "Backup versioning error."
@@ -264,6 +268,7 @@ class BackupVersioningError(BackupError):
 class HomeBackupError(BackupError):
     message = "Error backing up home directory."
     error_code = "HOME_BACKUP_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class RestoreError(UsrCtlError):
     message = "Error in restoration operation."
@@ -285,6 +290,7 @@ class AuditError(UsrCtlError):
 class LogWriteError(AuditError):
     message = "It was not possible to write to the audit log."
     error_code = "LOG_WRITE_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class SyslogIntegrationError(AuditError):
     message = "Syslog integration error."
@@ -301,14 +307,17 @@ class ReportError(UsrCtlError):
 class ReportBuildError(ReportError):
     message = "It was not possible to build the report."
     error_code = "REPORT_BUILD_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class JsonExportError(ReportError):
     message = "JSON export error."
     error_code = "JSON_EXPORT_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class CsvExportError(ReportError):
     message = "CSV export error."
     error_code = "CSV_EXPORT_ERROR"
+    exit_code = EXIT_CODE_COMMAND
 
 class DryRunError(UsrCtlError):
     message = "Error in safe mode or simulation."
