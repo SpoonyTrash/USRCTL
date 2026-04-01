@@ -1,3 +1,11 @@
+"""Contrato central de excepciones para el proyecto ``usrctl``.
+
+Este módulo define la jerarquía oficial de errores del sistema CLI y actúa
+como contrato arquitectónico para el manejo uniforme de fallos.
+
+Convención general: todas las excepciones del sistema deben derivar de
+:class:`UsrCtlError`.
+"""
 
 from __future__ import annotations
 
@@ -5,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
+# Sección de soporte mínima del módulo (códigos de salida semánticos).
 EXIT_CODE_GENERAL = 1
 EXIT_CODE_VALIDATION = 2
 EXIT_CODE_PERMISSIONS = 3
@@ -16,6 +25,17 @@ EXIT_CODE_COMMAND = 7
 
 @dataclass(eq=False)
 class UsrCtlError(Exception):
+    """Excepción base de ``usrctl``.
+
+    Atributos:
+        message: Mensaje principal orientado a operador/usuario.
+        error_code: Código estable y semántico del error.
+        hint: Sugerencia opcional de remediación.
+        details: Metadatos técnicos opcionales para diagnóstico.
+        exit_code: Código de salida del proceso CLI.
+        cause: Excepción original encadenada (si existe).
+    """
+
     message: str = "Se produjo un error en usrctl."
     error_code: str = "USRCTL_ERROR"
     hint: str | None = None
@@ -28,6 +48,8 @@ class UsrCtlError(Exception):
         if self.cause is not None and self.__cause__ is None:
             self.__cause__ = self.cause
 
+
+# 5) Excepciones transversales del sistema
 class ValidationError(UsrCtlError):
     def __init__(self, message: str = "Entrada inválida o inconsistente.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="VALIDATION_ERROR", exit_code=EXIT_CODE_VALIDATION, **kwargs)
@@ -62,24 +84,26 @@ class CommandExecutionError(UsrCtlError):
     def __init__(self, message: str = "Error al ejecutar un comando Linux subyacente.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="COMMAND_EXECUTION_ERROR", exit_code=EXIT_CODE_COMMAND, **kwargs)
 
+
+# 6) Dominio de usuarios
 class UserError(UsrCtlError):
-  def __init__(self, message: str = "Error en la gestión de usuarios.", **kwargs: Any) -> None:
-    super().__init__(message=message, error_code="USER_ERROR", **kwargs)
+    def __init__(self, message: str = "Error en la gestión de usuarios.", **kwargs: Any) -> None:
+        super().__init__(message=message, error_code="USER_ERROR", **kwargs)
 
 
 class UserAlreadyExistsError(UserError):
-  def __init__(self, message: str = "El usuario ya existe.", **kwargs: Any) -> None:
-    super().__init__(message=message, error_code="USER_ALREADY_EXISTS", exit_code=EXIT_CODE_CONFLICT, **kwargs)
+    def __init__(self, message: str = "El usuario ya existe.", **kwargs: Any) -> None:
+        super().__init__(message=message, error_code="USER_ALREADY_EXISTS", exit_code=EXIT_CODE_CONFLICT, **kwargs)
 
 
 class UserNotFoundError(UserError):
-  def __init__(self, message: str = "El usuario no fue encontrado.", **kwargs: Any) -> None:
-    super().__init__(message=message, error_code="USER_NOT_FOUND", exit_code=EXIT_CODE_NOT_FOUND, **kwargs)
+    def __init__(self, message: str = "El usuario no fue encontrado.", **kwargs: Any) -> None:
+        super().__init__(message=message, error_code="USER_NOT_FOUND", exit_code=EXIT_CODE_NOT_FOUND, **kwargs)
 
 
 class InvalidUsernameError(UserError):
-  def __init__(self, message: str = "Nombre de usuario inválido.", **kwargs: Any) -> None:
-    super().__init__(message=message, error_code="INVALID_USERNAME", exit_code=EXIT_CODE_VALIDATION, **kwargs)
+    def __init__(self, message: str = "Nombre de usuario inválido.", **kwargs: Any) -> None:
+        super().__init__(message=message, error_code="INVALID_USERNAME", exit_code=EXIT_CODE_VALIDATION, **kwargs)
 
 
 class InvalidUidError(UserError):
@@ -102,6 +126,7 @@ class AccountLockError(UserError):
         super().__init__(message=message, error_code="ACCOUNT_LOCK_ERROR", **kwargs)
 
 
+# 7) Dominio de grupos
 class GroupError(UsrCtlError):
     def __init__(self, message: str = "Error en la gestión de grupos.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="GROUP_ERROR", **kwargs)
@@ -131,13 +156,17 @@ class GroupMembershipError(GroupError):
     def __init__(self, message: str = "Error de membresía de grupo.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="GROUP_MEMBERSHIP_ERROR", **kwargs)
 
+
+# 8) Dominio de contraseñas
 class PasswordError(UsrCtlError):
     def __init__(self, message: str = "Error en la gestión de contraseñas.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="PASSWORD_ERROR", **kwargs)
 
+
 class WeakPasswordError(PasswordError):
     def __init__(self, message: str = "La contraseña no cumple la política de fortaleza.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="WEAK_PASSWORD", exit_code=EXIT_CODE_VALIDATION, **kwargs)
+
 
 class PasswordGenerationError(PasswordError):
     def __init__(self, message: str = "No fue posible generar una contraseña segura.", **kwargs: Any) -> None:
@@ -154,6 +183,7 @@ class ForcePasswordChangeError(PasswordError):
         super().__init__(message=message, error_code="FORCE_PASSWORD_CHANGE_ERROR", **kwargs)
 
 
+# 9) Dominio de políticas de seguridad
 class PolicyError(UsrCtlError):
     def __init__(self, message: str = "Error en políticas de seguridad.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="POLICY_ERROR", **kwargs)
@@ -178,6 +208,8 @@ class AdvancedSecurityPolicyError(PolicyError):
     def __init__(self, message: str = "Error en política de seguridad avanzada.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="ADVANCED_SECURITY_POLICY_ERROR", **kwargs)
 
+
+# 10) Dominio de permisos y archivos
 class FilePermissionError(UsrCtlError):
     def __init__(self, message: str = "Error en permisos u operaciones de archivos.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="FILE_PERMISSION_ERROR", **kwargs)
@@ -208,6 +240,7 @@ class UnsafeRecursiveOperationError(FilePermissionError):
         super().__init__(message=message, error_code="UNSAFE_RECURSIVE_OPERATION_ERROR", exit_code=EXIT_CODE_SECURITY, **kwargs)
 
 
+# 11) Dominio de perfiles y plantillas
 class TemplateError(UsrCtlError):
     def __init__(self, message: str = "Error en gestión de plantillas.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="TEMPLATE_ERROR", **kwargs)
@@ -233,6 +266,7 @@ class BaseProfileCopyError(TemplateError):
         super().__init__(message=message, error_code="BASE_PROFILE_COPY_ERROR", **kwargs)
 
 
+# 12) Dominio de límites de recursos
 class LimitsError(UsrCtlError):
     def __init__(self, message: str = "Error en la gestión de límites de recursos.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="LIMITS_ERROR", **kwargs)
@@ -252,6 +286,8 @@ class LimitsConsistencyError(LimitsError):
     def __init__(self, message: str = "Inconsistencia entre límites definidos.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="LIMITS_CONSISTENCY_ERROR", exit_code=EXIT_CODE_CONFLICT, **kwargs)
 
+
+# 13) Dominio de backup y restauración
 class BackupError(UsrCtlError):
     def __init__(self, message: str = "Error en operación de backup.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="BACKUP_ERROR", **kwargs)
@@ -287,6 +323,7 @@ class PartialRestoreError(RestoreError):
         super().__init__(message=message, error_code="PARTIAL_RESTORE_ERROR", **kwargs)
 
 
+# 14) Dominio de auditoría y registro
 class AuditError(UsrCtlError):
     def __init__(self, message: str = "Error en auditoría y registro.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="AUDIT_ERROR", **kwargs)
@@ -307,6 +344,7 @@ class TraceabilityError(AuditError):
         super().__init__(message=message, error_code="TRACEABILITY_ERROR", **kwargs)
 
 
+# 15) Dominio de reportes y exportación
 class ReportError(UsrCtlError):
     def __init__(self, message: str = "Error en generación o exportación de reportes.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="REPORT_ERROR", **kwargs)
@@ -327,6 +365,7 @@ class CsvExportError(ReportError):
         super().__init__(message=message, error_code="CSV_EXPORT_ERROR", **kwargs)
 
 
+# 16) Dominio de modo seguro y simulación
 class DryRunError(UsrCtlError):
     def __init__(self, message: str = "Error en modo seguro o simulación.", **kwargs: Any) -> None:
         super().__init__(message=message, error_code="DRY_RUN_ERROR", **kwargs)
@@ -352,6 +391,7 @@ class DangerousImpactError(DryRunError):
         super().__init__(message=message, error_code="DANGEROUS_IMPACT_ERROR", exit_code=EXIT_CODE_SECURITY, **kwargs)
 
 
+# 19) Interfaz pública del módulo (debe permanecer al final del archivo)
 __all__ = [
     "EXIT_CODE_GENERAL",
     "EXIT_CODE_VALIDATION",
