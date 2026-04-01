@@ -12,11 +12,14 @@ EXIT_CODE_NOT_FOUND = 4
 EXIT_CODE_CONFLICT = 5
 EXIT_CODE_SECURITY = 6
 EXIT_CODE_COMMAND = 7
+ERROR_CATEGORY_DOMAIN = "domain"
+ERROR_CATEGORY_INFRAESTRUCTURE = "infraestructure"
 
 class UsrCtlError(Exception):
     message: ClassVar[str] = "An error occurred in usrctl."
     error_code: ClassVar[str] = "USRCTL_ERROR"
     exit_code: ClassVar[int] = EXIT_CODE_GENERAL
+    category: ClassVar[str] = ERROR_CATEGORY_INFRAESTRUCTURE
     
 
     def __init__(
@@ -27,13 +30,15 @@ class UsrCtlError(Exception):
         hint: str | None = None,
         details: Mapping[str, Any] = field(default_factory=dict),
         exit_code: int | None = None,
+        category: str | None = None,
         cause: Exception | None = None
     ) -> None:
         self.message = message or self.__class__.message
         self.error_code = error_code or self.__class__.error_code
         self.hint = hint
-        self.details = details or {}
+        self.details = dict(details or {})
         self.exit_code = exit_code if exit_code is not None else self.__class__.exit_code
+        self.category = category or self.__class__.category
         self.cause = cause
 
         super().__init__(self.message)
@@ -46,7 +51,8 @@ class UsrCtlError(Exception):
             "error_code": self.error_code,
             "hint": self.hint,
             "details": dict(self.details),
-            "exit_code": self.exit_code
+            "exit_code": self.exit_code,
+            "category": self.category
         }
         if self.cause is not None:
             payload["cause"] = str(self.cause)
@@ -85,10 +91,12 @@ class CommandExecutionError(UsrCtlError):
     message = "Error executing an underlying Linux command."
     error_code = "COMMAND_EXECUTION_ERROR"
     exit_code = EXIT_CODE_COMMAND
+    category = ERROR_CATEGORY_INFRAESTRUCTURE
 
 class UserError(UsrCtlError):
     message = "User management error."
     error_code = "USER_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class UserAlreadyExistsError(UserError):
     message = "The user already exists."
@@ -128,6 +136,7 @@ class AccountLockError(UserError):
 class GroupError(UsrCtlError):
     message = "Error in group management."
     error_code = "GROUP_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class GroupAlreadyExistsError(GroupError):
     message = "The group already exists."
@@ -178,6 +187,7 @@ class ForcePasswordChangeError(PasswordError):
 class PolicyError(UsrCtlError):
     message = "Error in security policies."
     error_code = "POLICY_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class AccountExpirationError(PolicyError):
     message = "Error defining or applying account expiration."
@@ -200,6 +210,7 @@ class AdvancedSecurityPolicyError(PolicyError):
 class FilePermissionError(UsrCtlError):
     message = "Error in file permissions or operations."
     error_code = "FILE_PERMISSION_ERROR"
+    category = ERROR_CATEGORY_INFRAESTRUCTURE
 
 class OwnershipChangeError(FilePermissionError):
     message = "It was not possible to change the owner."
@@ -226,6 +237,7 @@ class UnsafeRecursiveOperationError(FilePermissionError):
 class TemplateError(UsrCtlError):
     message = "Template management error."
     error_code = "TEMPLATE_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class TemplateNotFoundError(TemplateError):
     message = "Template not found."
@@ -248,6 +260,7 @@ class BaseProfileCopyError(TemplateError):
 class LimitsError(UsrCtlError):
     message = "Error in resource limit management."
     error_code = "LIMITS_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class InvalidLimitError(LimitsError):
     message = "Invalid or out-of-range limit."
@@ -263,10 +276,10 @@ class LimitsConsistencyError(LimitsError):
     error_code = "LIMITS_CONSISTENCY_ERROR"
     exit_code = EXIT_CODE_VALIDATION
 
-
 class BackupError(UsrCtlError):
     message = "Backup operation error."
     error_code = "BACKUP_ERROR"
+    category = ERROR_CATEGORY_INFRAESTRUCTURE
 
 class BackupCreationError(BackupError):
     message = "It was not possible to create the backup."
@@ -285,6 +298,7 @@ class HomeBackupError(BackupError):
 class RestoreError(UsrCtlError):
     message = "Error in restoration operation."
     error_code = "RESTORE_ERROR"
+    category = ERROR_CATEGORY_INFRAESTRUCTURE
 
 class BackupNotFoundError(RestoreError):
     message = "The requested backup version was not found."
@@ -298,6 +312,7 @@ class PartialRestoreError(RestoreError):
 class AuditError(UsrCtlError):
     message = "Error in audit and record."
     error_code = "AUDIT_ERROR"
+    category = ERROR_CATEGORY_INFRAESTRUCTURE
 
 class LogWriteError(AuditError):
     message = "It was not possible to write to the audit log."
@@ -315,6 +330,7 @@ class TraceabilityError(AuditError):
 class ReportError(UsrCtlError):
     message = "Error in generating or exporting reports."
     error_code = "REPORT_ERROR"
+    category = ERROR_CATEGORY_INFRAESTRUCTURE
 
 class ReportBuildError(ReportError):
     message = "It was not possible to build the report."
@@ -363,6 +379,8 @@ __all__ = [
     "EXIT_CODE_CONFLICT",
     "EXIT_CODE_SECURITY",
     "EXIT_CODE_COMMAND",
+    "ERROR_CATEGORY_DOMAIN",
+    "ERROR_CATEGORY_INFRAESTRUCTURE"
     "UsrCtlError",
     "ValidationError",
     "InsufficientPermissionsError",
