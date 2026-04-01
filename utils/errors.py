@@ -12,13 +12,13 @@ EXIT_CODE_CONFLICT = 5
 EXIT_CODE_SECURITY = 6
 EXIT_CODE_COMMAND = 7
 ERROR_CATEGORY_DOMAIN = "domain"
-ERROR_CATEGORY_INFRAESTRUCTURE = "infrastructure"
+ERROR_CATEGORY_INFRASTRUCTURE = "infrastructure"
 
 class UsrCtlError(Exception):
     message: ClassVar[str] = "An error occurred in usrctl."
     error_code: ClassVar[str] = "USRCTL_ERROR"
     exit_code: ClassVar[int] = EXIT_CODE_GENERAL
-    category: ClassVar[str] = ERROR_CATEGORY_INFRAESTRUCTURE
+    category: ClassVar[str] = ERROR_CATEGORY_INFRASTRUCTURE
     
 
     def __init__(
@@ -46,6 +46,7 @@ class UsrCtlError(Exception):
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
+            "type": self.__class__.__name__,
             "message": self.message,
             "error_code": self.error_code,
             "hint": self.hint,
@@ -54,11 +55,11 @@ class UsrCtlError(Exception):
             "category": self.category
         }
         if self.cause is not None:
-            payload["cause"] = str(self.cause)
+            payload["cause"] = repr(self.cause)
         return payload
 
 class ValidationError(UsrCtlError):
-    message = "Invalid or inconsistent entry."
+    message = "Invalid or inconsistent input."
     error_code = "VALIDATION_ERROR"
     exit_code = EXIT_CODE_VALIDATION
 
@@ -82,7 +83,7 @@ class ConflictError(UsrCtlError):
     exit_code = EXIT_CODE_CONFLICT
 
 class PreventiveSecurityError(UsrCtlError):
-    message = "Operation blocked for preventative security reasons."
+    message = "Operation blocked for preventive security reasons."
     error_code = "PREVENTIVE_SECURITY_ERROR"
     exit_code = EXIT_CODE_SECURITY
 
@@ -90,7 +91,7 @@ class CommandExecutionError(UsrCtlError):
     message = "Error executing an underlying Linux command."
     error_code = "COMMAND_EXECUTION_ERROR"
     exit_code = EXIT_CODE_COMMAND
-    category = ERROR_CATEGORY_INFRAESTRUCTURE
+    category = ERROR_CATEGORY_INFRASTRUCTURE
 
 class UserError(UsrCtlError):
     message = "User management error."
@@ -118,7 +119,7 @@ class InvalidUidError(UserError):
     exit_code = EXIT_CODE_VALIDATION
 
 class HomeDirectoryError(UserError):
-    message = "Error in the operation on the home directory."
+    message = "Error while operating on the home directory."
     error_code = "HOME_DIRECTORY_ERROR"
     exit_code = EXIT_CODE_COMMAND
 
@@ -133,7 +134,7 @@ class AccountLockError(UserError):
     exit_code = EXIT_CODE_SECURITY
 
 class GroupError(UsrCtlError):
-    message = "Error in group management."
+    message = "Group management error."
     error_code = "GROUP_ERROR"
     category = ERROR_CATEGORY_DOMAIN
 
@@ -172,16 +173,16 @@ class WeakPasswordError(PasswordError):
     exit_code = EXIT_CODE_VALIDATION
 
 class PasswordGenerationError(PasswordError):
-    message = "It was not possible to generate a secure password."
+    message = "Unable to generate a secure password."
     error_code = "PASSWORD_GENERATION_ERROR"
 
 class PasswordChangeError(PasswordError):
-    message = "It was not possible to change the password."
+    message = "Unable to change the password."
     error_code = "PASSWORD_CHANGE_ERROR"
     exit_code = EXIT_CODE_SECURITY
 
 class ForcePasswordChangeError(PasswordError):
-    message = "It was not possible to force a password change on the next login."
+    message = "Unable to require a password change at next login."
     error_code = "FORCE_PASSWORD_CHANGE_ERROR"
 
 class PolicyError(UsrCtlError):
@@ -200,7 +201,7 @@ class InactivityPolicyError(PolicyError):
     exit_code = EXIT_CODE_VALIDATION
 
 class LoginRestrictionError(PolicyError):
-    message = "It was not possible to apply a login restriction."
+    message = "Unable to apply login restriction."
     error_code = "LOGIN_RESTRICTION_ERROR"
 
 class AdvancedSecurityPolicyError(PolicyError):
@@ -210,22 +211,22 @@ class AdvancedSecurityPolicyError(PolicyError):
 class FilePermissionError(UsrCtlError):
     message = "Error in file permissions or operations."
     error_code = "FILE_PERMISSION_ERROR"
-    category = ERROR_CATEGORY_INFRAESTRUCTURE
+    category = ERROR_CATEGORY_INFRASTRUCTURE
 
 class OwnershipChangeError(FilePermissionError):
-    message = "It was not possible to change the owner."
+    message = "Unable to change file owner."
     error_code = "OWNERSHIP_CHANGE_ERROR"
 
 class GroupOwnershipChangeError(FilePermissionError):
-    message = "It was not possible to change the owning group."
+    message = "Unable to change file group ownership."
     error_code = "GROUP_OWNERSHIP_CHANGE_ERROR"
 
 class PermissionChangeError(FilePermissionError):
-    message = "It was not possible to modify permissions (chmod)."
+    message = "Unable to change file permissions (chmod)."
     error_code = "PERMISSION_CHANGE_ERROR"
 
 class PathValidationError(FilePermissionError):
-    message = "Non-existent, sensitive, or unauthorized route."
+    message = "Path is invalid, sensitive, or not authorized."
     error_code = "PATH_VALIDATION_ERROR"
     exit_code = EXIT_CODE_VALIDATION
 
@@ -254,7 +255,7 @@ class TemplateApplicationError(TemplateError):
     error_code = "TEMPLATE_APPLICATION_ERROR"
 
 class BaseProfileCopyError(TemplateError):
-    message = "Error copying base profile settings."
+    message = "Unable to copy base profile settings."
     error_code = "BASE_PROFILE_COPY_ERROR"
 
 class LimitsError(UsrCtlError):
@@ -268,7 +269,7 @@ class InvalidLimitError(LimitsError):
     exit_code = EXIT_CODE_VALIDATION
 
 class ApplyLimitsError(LimitsError):
-    message = "It was not possible to apply resource limits."
+    message = "Unable to apply resource limits."
     error_code = "APPLY_LIMITS_ERROR"
 
 class LimitsConsistencyError(LimitsError):
@@ -279,10 +280,10 @@ class LimitsConsistencyError(LimitsError):
 class BackupError(UsrCtlError):
     message = "Backup operation error."
     error_code = "BACKUP_ERROR"
-    category = ERROR_CATEGORY_INFRAESTRUCTURE
+    category = ERROR_CATEGORY_INFRASTRUCTURE
 
 class BackupCreationError(BackupError):
-    message = "It was not possible to create the backup."
+    message = "Unable to create the backup."
     error_code = "BACKUP_CREATION_ERROR"
     exit_code = EXIT_CODE_COMMAND
 
@@ -291,14 +292,14 @@ class BackupVersioningError(BackupError):
     error_code = "BACKUP_VERSIONING_ERROR"
 
 class HomeBackupError(BackupError):
-    message = "Error backing up home directory."
+    message = "Unable to back up home directory."
     error_code = "HOME_BACKUP_ERROR"
     exit_code = EXIT_CODE_COMMAND
 
 class RestoreError(UsrCtlError):
-    message = "Error in restoration operation."
+    message = "Restore operation error."
     error_code = "RESTORE_ERROR"
-    category = ERROR_CATEGORY_INFRAESTRUCTURE
+    category = ERROR_CATEGORY_INFRASTRUCTURE
 
 class BackupNotFoundError(RestoreError):
     message = "The requested backup version was not found."
@@ -306,16 +307,16 @@ class BackupNotFoundError(RestoreError):
     exit_code = EXIT_CODE_NOT_FOUND
 
 class PartialRestoreError(RestoreError):
-    message = "Failed or partial restoration."
+    message = "Restore operation failed or completed partially."
     error_code = "PARTIAL_RESTORE_ERROR"
 
 class AuditError(UsrCtlError):
-    message = "Error in audit and record."
+    message = "Audit and logging error."
     error_code = "AUDIT_ERROR"
-    category = ERROR_CATEGORY_INFRAESTRUCTURE
+    category = ERROR_CATEGORY_INFRASTRUCTURE
 
 class LogWriteError(AuditError):
-    message = "It was not possible to write to the audit log."
+    message = "Unable to write to the audit log."
     error_code = "LOG_WRITE_ERROR"
     exit_code = EXIT_CODE_COMMAND
 
@@ -324,16 +325,16 @@ class SyslogIntegrationError(AuditError):
     error_code = "SYSLOG_INTEGRATION_ERROR"
 
 class TraceabilityError(AuditError):
-    message = "Event history or traceability error."
+    message = "Audit trail or event history error."
     error_code = "TRACEABILITY_ERROR"
 
 class ReportError(UsrCtlError):
-    message = "Error in generating or exporting reports."
+    message = "Error generating or exporting reports."
     error_code = "REPORT_ERROR"
-    category = ERROR_CATEGORY_INFRAESTRUCTURE
+    category = ERROR_CATEGORY_INFRASTRUCTURE
 
 class ReportBuildError(ReportError):
-    message = "It was not possible to build the report."
+    message = "Unable to build report."
     error_code = "REPORT_BUILD_ERROR"
     exit_code = EXIT_CODE_COMMAND
 
@@ -348,12 +349,12 @@ class CsvExportError(ReportError):
     exit_code = EXIT_CODE_COMMAND
 
 class DryRunError(UsrCtlError):
-    message = "Error in safe mode or simulation."
+    message = "Dry-run or simulation error."
     error_code = "DRY_RUN_ERROR"
     category = ERROR_CATEGORY_DOMAIN
 
 class InvalidSimulationError(DryRunError):
-    message = "Invalid or unrepresentative simulation."
+    message = "Simulation is invalid or does not accurately represent the operation."
     error_code = "INVALID_SIMULATION_ERROR"
     exit_code = EXIT_CODE_VALIDATION
 
@@ -366,11 +367,10 @@ class ConfirmationRequiredError(DryRunError):
     error_code = "CONFIRMATION_REQUIRED_ERROR"
     exit_code = EXIT_CODE_SECURITY
 
-
 class DangerousImpactError(DryRunError):
-    message = "Hazardous impact detected: operation blocked."
+    message = "Dangerous impact detected; operation blocked."
     error_code = "DANGEROUS_IMPACT_ERROR"
-
+    exit_code = EXIT_CODE_SECURITY
 
 __all__ = [
     "EXIT_CODE_GENERAL",
@@ -381,7 +381,7 @@ __all__ = [
     "EXIT_CODE_SECURITY",
     "EXIT_CODE_COMMAND",
     "ERROR_CATEGORY_DOMAIN",
-    "ERROR_CATEGORY_INFRAESTRUCTURE",
+    "ERROR_CATEGORY_INFRASTRUCTURE",
     "UsrCtlError",
     "ValidationError",
     "InsufficientPermissionsError",
