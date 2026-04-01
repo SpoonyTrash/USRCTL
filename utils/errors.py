@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-from dataclasses import field
 from typing import Any, Mapping, ClassVar
 
 
@@ -13,7 +12,7 @@ EXIT_CODE_CONFLICT = 5
 EXIT_CODE_SECURITY = 6
 EXIT_CODE_COMMAND = 7
 ERROR_CATEGORY_DOMAIN = "domain"
-ERROR_CATEGORY_INFRAESTRUCTURE = "infraestructure"
+ERROR_CATEGORY_INFRAESTRUCTURE = "infrastructure"
 
 class UsrCtlError(Exception):
     message: ClassVar[str] = "An error occurred in usrctl."
@@ -28,7 +27,7 @@ class UsrCtlError(Exception):
         *,
         error_code: str | None = None,
         hint: str | None = None,
-        details: Mapping[str, Any] = field(default_factory=dict),
+        details: Mapping[str, Any] | None = None,
         exit_code: int | None = None,
         category: str | None = None,
         cause: Exception | None = None
@@ -165,6 +164,7 @@ class GroupMembershipError(GroupError):
 class PasswordError(UsrCtlError):
     message = "Password management error."
     error_code = "PASSWORD_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class WeakPasswordError(PasswordError):
     message = "The password does not meet the strength policy."
@@ -350,6 +350,7 @@ class CsvExportError(ReportError):
 class DryRunError(UsrCtlError):
     message = "Error in safe mode or simulation."
     error_code = "DRY_RUN_ERROR"
+    category = ERROR_CATEGORY_DOMAIN
 
 class InvalidSimulationError(DryRunError):
     message = "Invalid or unrepresentative simulation."
@@ -380,7 +381,7 @@ __all__ = [
     "EXIT_CODE_SECURITY",
     "EXIT_CODE_COMMAND",
     "ERROR_CATEGORY_DOMAIN",
-    "ERROR_CATEGORY_INFRAESTRUCTURE"
+    "ERROR_CATEGORY_INFRAESTRUCTURE",
     "UsrCtlError",
     "ValidationError",
     "InsufficientPermissionsError",
