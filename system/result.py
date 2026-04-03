@@ -77,6 +77,17 @@ class SystemResult:
     
     if self.status == ResultStatus.PARTIAL and self.ok and not (self.warnings or self.details):
       raise ValueError("status=PARTIAL con ok=True require warnings o details")
+    
+    if(
+      not self.changed
+      and self.status not in {ResultStatus.DRY_RUN, ResultStatus.SKIPPED}
+      and self.impact.level == ImpactLevel.CRITICAL
+      and not (self.warnings or self.details)
+    ):
+      raise ValueError("changed=False con impact=CRITICAL require warnings o details")
+    
+    if self.impact.applied_resources and not self.changed:
+      raise ValueError("impact.applied_resources require changed=True")
 
 
   @property
