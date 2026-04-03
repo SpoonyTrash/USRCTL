@@ -137,11 +137,50 @@ class ValidationResult(SystemResult):
   blocking_reasons: list[str] = field(default_factory=list)
   should_continue: bool = True
 
-@dataclass(slots=True)
+@dataclass(slots=True, init=False)
 class DryRunResult(SystemResult):
   dry_run: bool = True
   status: ResultStatus = ResultStatus.DRY_RUN
   simulation: SimulationMetadata = field(default_factory=SimulationMetadata)
+
+  def __init__(
+    self,
+    action: str,
+    target: str | None = None,
+    message: str = "",
+    details: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+    timestamp: str | None = None,
+    changed: bool = False,
+    execution: ExecutionMetadata | None = None,
+    impact: ImpactMetadata | None = None,
+    simulation: SimulationMetadata | None = None
+  ) -> None:
+    SystemResult.__init__(
+      self,
+      ok=True,
+      status=ResultStatus.DRY_RUN,
+      action=action,
+      target=target,
+      message=message,
+      details=details or {},
+      warnings=warnings or {},
+      timestamp=timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+      dry_run=True,
+      changed=changed,
+      execution=execution,
+      impact=impact or ImpactMetadata(),
+      simulation= simulation or SimulationMetadata()
+    )
+
+    def __post_init__(self) -> None:
+      if self.changed:
+        raise ValueError("DryRunResult require changed=False")
+    
+      if self.simulation is None:
+        self.simulation = SimulationMetadata()
+      
+      SystemResult.__post_init__(self)
 
 @dataclass(slots=True)
 class StateChangeResult(SystemResult):
