@@ -76,7 +76,7 @@ class SystemResult:
       raise ValueError("status=SKIPPED require changed=False")
     
     if self.status == ResultStatus.PARTIAL and self.ok and not (self.warnings or self.details):
-      raise ValueError("status=PARTIAL con ok=True require warnings o details")
+      raise ValueError("status=PARTIAL with ok=True requires warnings or details")
     
     if(
       not self.changed
@@ -84,7 +84,7 @@ class SystemResult:
       and self.impact.level == ImpactLevel.CRITICAL
       and not (self.warnings or self.details)
     ):
-      raise ValueError("changed=False con impact=CRITICAL require warnings o details")
+      raise ValueError("changed=False with impact=CRITICAL requires warnings or details")
     
     if self.impact.applied_resources and not self.changed:
       raise ValueError("impact.applied_resources require changed=True")
