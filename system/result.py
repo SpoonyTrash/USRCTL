@@ -81,7 +81,11 @@ class SystemResult:
 
   @property
   def is_success(self) -> bool:
-    return self.ok and self.status in {ResultStatus.SUCCESS, ResultStatus.DRY_RUN}
+    return self.status == ResultStatus.SUCCESS
+  
+  @property
+  def is_effectively_ok(self) -> bool:
+    return self.status in {ResultStatus.SUCCESS, ResultStatus.DRY_RUN}
   
   @property
   def is_failure(self) -> bool:
@@ -123,9 +127,21 @@ class SystemResult:
     record = self.summary()
     record["warnings"] = self.warnings
     record["details"] = self.details
+    record["impact_level"] = self.impact.level.value
     if self.execution:
-      record["return_code"] = self.execution.return_code
       record["operation_id"] = self.execution.operation_id
+      if self.execution.return_code is not None:
+        record["return_code"] = self.execution.return_code
+      if self.execution.binary:
+        record["binary"] = self.execution.binary
+      if self.execution.duration_ms is not None:
+        record["duration_ms"] = self.execution.duration_ms
+    
+    if self.is_simulated and self.simulation:
+      if self.simulation.detected_risks:
+        record["detected_risks"] = self.simulation.detected_risks
+      record["confirmation_required"] = self.simulation.confirmation_required
+
     return record
   
   def full_details(self) -> dict[str, Any]:
@@ -177,7 +193,7 @@ class DryRunResult(SystemResult):
       target=target,
       message=message,
       details=details or {},
-      warnings=warnings or {},
+      warnings=warnings or [],
       timestamp=timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds"),
       dry_run=True,
       changed=changed,
@@ -186,14 +202,14 @@ class DryRunResult(SystemResult):
       simulation= simulation or SimulationMetadata()
     )
 
-    def __post_init__(self) -> None:
-      if self.changed:
-        raise ValueError("DryRunResult require changed=False")
+  def __post_init__(self) -> None:
+    if self.changed:
+      raise ValueError("DryRunResult require changed=False")
     
-      if self.simulation is None:
-        self.simulation = SimulationMetadata()
+    if self.simulation is None:
+      self.simulation = SimulationMetadata()
       
-      SystemResult.__post_init__(self)
+    SystemResult.__post_init__(self)
 
 @dataclass(slots=True)
 class StateChangeResult(SystemResult):
