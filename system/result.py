@@ -59,6 +59,26 @@ class SystemResult:
   impact: ImpactMetadata = field(default_factory=ImpactMetadata)
   simulation: SimulationMetadata | None = None
 
+  def __post_init__(self) -> None:
+    if self.status == ResultStatus.SUCCESS and not self.ok:
+      raise ValueError("status=SUCCESS require ok=True")
+    
+    if self.status == ResultStatus.FAILURE and self.ok:
+      raise ValueError("status=FAILURE require ok=False")
+    
+    if self.status == ResultStatus.DRY_RUN and not self.dry_run:
+      raise ValueError("status=DRY_RUN require dry_run=True")
+    
+    if self.dry_run and self.changed:
+      raise ValueError("dry_run=True require changed=False")
+    
+    if self.status == ResultStatus.SKIPPED and self.changed:
+      raise ValueError("status=SKIPPED require changed=False")
+    
+    if self.status == ResultStatus.PARTIAL and self.ok and not (self.warnings or self.details):
+      raise ValueError("status=PARTIAL con ok=True require warnings o details")
+
+
   @property
   def is_success(self) -> bool:
     return self.ok and self.status in {ResultStatus.SUCCESS, ResultStatus.DRY_RUN}
