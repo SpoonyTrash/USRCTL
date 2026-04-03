@@ -112,6 +112,9 @@ class SystemResult:
       "message": self.message,
       "dry_run": self.dry_run,
       "changed": self.changed,
+      "warnings_count": len(self.warnings),
+      "has_execution": self.execution is not None,
+      "has_simulation": self.simulation is not None,
       "impact": self.impact.level.value,
       "timestamp": self.timestamp
     }
@@ -144,8 +147,6 @@ class SystemResult:
 
     return record
   
-  def full_details(self) -> dict[str, Any]:
-    return self.to_dict()
 
 @dataclass(slots=True)
 class CommandResult(SystemResult):
@@ -211,6 +212,79 @@ class DryRunResult(SystemResult):
       
     SystemResult.__post_init__(self)
 
+@dataclass(slots=True, init=False)
+class PartialResult(SystemResult):
+  status: ResultStatus = ResultStatus.PARTIAL
+
+  def __init__(
+    self,
+    action: str,
+    target: str | None = None,
+    message: str = "",
+    details: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+    timestamp: str | None = None,
+    ok: bool = True,
+    dry_run: bool = False,
+    changed: bool = False,
+    execution: ExecutionMetadata | None = None,
+    impact: ImpactMetadata | None = None,
+    simulation: SimulationMetadata | None = None
+  ) -> None:
+    SystemResult.__init__(
+      self,
+      ok=ok,
+      status=ResultStatus.PARTIAL,
+      action=action,
+      target=target,
+      message=message,
+      details=details or {},
+      warnings=warnings or [],
+      timestamp=timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+      dry_run=dry_run,
+      changed=changed,
+      execution=execution,
+      impact=impact or ImpactMetadata(),
+      simulation=simulation
+    )
+
+@dataclass(slots=True, init=False)
+class SkippedResult(SystemResult):
+  status: ResultStatus = ResultStatus.SKIPPED
+  changed: bool = False
+
+  def __init__(
+    self,
+    action: str,
+    target: str | None = None,
+    message: str = "",
+    details: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+    timestamp: str | None = None,
+    ok: bool = True,
+    dry_run: bool = False,
+    execution: ExecutionMetadata | None = None,
+    impact: ImpactMetadata | None = None,
+    simulation: SimulationMetadata | None = None
+  ) -> None:
+    SystemResult.__init__(
+      self,
+      ok=ok,
+      status=ResultStatus.SKIPPED,
+      action=action,
+      target=target,
+      message=message,
+      details=details or {},
+      warnings=warnings or [],
+      timestamp=timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+      dry_run=dry_run,
+      changed=False,
+      execution=execution,
+      impact=impact or ImpactMetadata(),
+      simulation=simulation
+    )
+
+
 @dataclass(slots=True)
 class StateChangeResult(SystemResult):
   changed_entities: list[str] = field(default_factory=list)
@@ -243,6 +317,8 @@ __all__ = [
   "CommandResult",
   "ValidationResult",
   "DryRunResult",
+  "PartialResult",
+  "SkippedResult",
   "StateChangeResult",
   "BackupResult",
   "ExportResult"
