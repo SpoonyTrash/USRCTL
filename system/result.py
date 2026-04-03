@@ -90,6 +90,10 @@ class SystemResult:
   @property
   def is_partial(self) -> bool:
     return self.status == ResultStatus.PARTIAL
+
+  @property
+  def is_skipped(self) -> bool:
+    return self.status == ResultStatus.SKIPPED
   
   @property
   def is_simulated(self) -> bool:
@@ -136,6 +140,15 @@ class ValidationResult(SystemResult):
   validation_passed: bool = True
   blocking_reasons: list[str] = field(default_factory=list)
   should_continue: bool = True
+
+  def __post_init__(self) -> None:
+    SystemResult.__post_init__(self)
+
+    if not self.validation_passed and self.should_continue:
+      raise ValueError("validation_passed=False require should_continue=False")
+
+    if self.blocking_reasons and self.validation_passed:
+      raise ValueError("blocking_reasons require validation_passed=False")
 
 @dataclass(slots=True, init=False)
 class DryRunResult(SystemResult):
