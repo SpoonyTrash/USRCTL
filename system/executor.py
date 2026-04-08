@@ -54,6 +54,30 @@ HIGH_IMPACT_BINARIES = {
   "rsync": ImpactLevel.MEDIUM
 }
 
+READ_ONLY_BINARIES = {
+  "id",
+  "getent"
+}
+
+MUTATING_BINARIES = {
+  "useradd",
+  "usermod",
+  "userdel",
+  "passwd",
+  "chpasswd",
+  "chage",
+  "groupadd",
+  "groupdel",
+  "groupmod",
+  "gpasswd",
+  "chmod",
+  "chown",
+  "tar",
+  "cp",
+  "mv",
+  "rm",
+}
+
 CRITICAL_KEYWORDS = (
   "/etc/shadow",
   "--remove-home",
@@ -149,6 +173,18 @@ def _safe_command_repr(command: Sequence[str]) -> list[str]:
   
 def _minimum_viability_check(command: Sequence[str]) -> None:
   _sanitize_arguments(list(command))
+
+def _is_mutating_command(command: Sequence[str]) -> bool:
+  binary = Path(command[0]).name
+  if binary not in READ_ONLY_BINARIES and binary not in MUTATING_BINARIES:
+    raise PreventiveSecurityError(
+      message="binary without explicit mutability policy.",
+      details={"binary": binary}
+    )
+  
+  if binary in READ_ONLY_BINARIES:
+    return False
+  return True
 
 def _estimate_impact(command: Sequence[str]) -> tuple[ImpactLevel, list[str], list[str]]:
   warnings: list[str] = []
@@ -395,6 +431,12 @@ class CommandExecutor:
         details={"binary": binary}
       )
     
+    if binary not in READ_ONLY_BINARIES and binary not in MUTATING_BINARIES:
+      raise  PreventiveSecurityError(
+        message="Binary without explicit mutability policy.",
+        details={"binary": binary}
+      )
+    
   def _execute_real(
       self,
       command: Sequence[str],
@@ -438,6 +480,7 @@ class CommandExecutor:
         stderr = self._redact_sensitive_text(stderr)
 
       ok = completed.returncode == 0
+      changed = ok and _is_mutating_command(command)
       message = "The command was executed successfully" if ok else "The command finished with an error."
       return self._to_command_result(
         ok=ok,
@@ -452,7 +495,7 @@ class CommandExecutor:
         warnings=impact_warnings,
         affected_resources=affected_resources,
         details=dict(audit_details),
-        changed=ok,
+        changed=changed,
         duration_ms=duration_ms,
         binary=Path(command[0]).name,
       )
