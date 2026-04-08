@@ -395,7 +395,8 @@ class CommandExecutor:
         "dependency": binary, 
         "checked_with": "shutil.which",
         "operation_kind": "dependency_check",
-        "command_is_pseudo": True
+        "command_is_pseudo": True,
+        "binary_classification": "read_only"
       },
       changed=False,
       duration_ms=0.0,
@@ -795,23 +796,8 @@ class CommandExecutor:
   ) -> CommandResult:
     stderr = str(error)
     details = getattr(error, "details", {}) or {}
-    impact_level = ImpactLevel.LOW
-    warnings = ["The technical execution produced a controlled error."]
-
-    if isinstance(error, InsufficientPermissionsError):
-      impact_level = ImpactLevel.MEDIUM
-      warnings = ["Execution blocked due to insufficient permissions."]
-    elif isinstance(error, ResourceNotFoundError):
-      impact_level = ImpactLevel.LOW
-      warnings = ["Required resource was not found."]
-    elif isinstance(error, PreventiveSecurityError):
-      impact_level = ImpactLevel.HIGH
-      warnings = ["Operation blocked by preventive security controlls."]
-    elif isinstance(error, CommandExecutionError):
-      is_timeout = details.get("reason") == "timeout" or isinstance(getattr(error, "cause", None), subprocess.TimeoutExpired)
-      if is_timeout:
-        impact_level = ImpactLevel.MEDIUM
-        warnings = ["Command execution timed out before completion."]
+    
+    impact_level, warnings = self._classify_error_impact(error, details)
 
     return self._to_command_result(
       ok=False,
@@ -830,18 +816,44 @@ class CommandExecutor:
       duration_ms=duration_ms,
       binary=Path(command_safe[0]).name if command_safe else "unknown"
     )
+  
+  def _classify_error_impact(
+      self,
+      error: Exception,
+      details: Mapping[str, Any]
+  ) -> tuple[ImpactLevel, list[str]]:
+    impact_level = ImpactLevel.LOW
+    warnings = ["The technical execution produced a controlled error."]
+
+    if isinstance(error, InsufficientPermissionsError):
+      impact_level = ImpactLevel.MEDIUM
+      warnings = ["Execution blocked due to insufficient permissions."]
+    elif isinstance(error, ResourceNotFoundError):
+      impact_level = ImpactLevel.LOW
+      warnings = ["Required resource was not found."]
+    elif isinstance(error, PreventiveSecurityError):
+      impact_level = ImpactLevel.HIGH
+      warnings = ["Operation blocked by preventive security controlls."]
+    elif isinstance(error, CommandExecutionError):
+      is_timeout = details.get("reason") == "timeout" or isinstance(getattr(error, "cause", None), subprocess.TimeoutExpired)
+      if is_timeout:
+        impact_level = ImpactLevel.MEDIUM
+        warnings = ["Command execution timed out before completion."]
+    
+    return impact_level, warnings
+    
 
   def _redact_sensitive_text(self, value: str) -> str:
     if not value:
       return value
     redacted = value
     for pattern in REDACTION_REGEX_PATTERNS:
-      redacted = re.sub(pattern, "[REDACTED]", redacted)
+      redacted = re.sub(pattern, self._redaction_replacer, redacted)
     
     lines: list[str] = []
     for line in redacted.splitlines():
       lowered = line.lower()
-      if any(keyword in lowered for keyword in {"password", "passwd", "token", "secret", "/etc/shadow"}):
+      if self._requires_full_line_redaction(lowered):
         lines.append("[REDACTED]")
       else:
         lines.append(line)
@@ -849,6 +861,15 @@ class CommandExecutor:
     if redacted.endswith("\n"):
       return "\n".join(lines) + "\n"
     return "\n".join(lines)
+  
+  def _redaction_replacer(self, match: re.Match[str]) -> str:
+    secret_key = match.group(1) if match.lastindex and match.lastindex >= 1 else None
+    if secret_key:
+      return f"{secret_key}=[REDACTED]"
+    return "[REDACTED]" 
+  
+  def _requires_full_line_redaction(self, lowered_line: str) -> bool:
+    return any(keyword in lowered_line for keyword in {"chpasswd", "/etc/shadow"})
   
   def _prepare_command(self, command: Sequence[str] | str) -> list[str]:
     normalized = _normalize_command(command)
