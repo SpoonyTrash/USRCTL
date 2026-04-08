@@ -2,6 +2,7 @@ import subprocess
 import shlex
 import os
 import shutil
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Any, Sequence
@@ -97,6 +98,19 @@ SENSITIVE_RECURSIVE_PATHS = (
   Path("/lib")
 )
 
+SENSITIVE_SYSTEM_PATHS = (
+  Path("/etc"),
+  Path("/usr"),
+  Path("/bin"),
+  Path("/sbin")
+)
+
+REDACTION_REGEX_PATTERNS = (
+  r"(?i)\b(password|passwd|pwd|token|secret)\b\s*[:=]\s*([^\s,;]+)",
+  r"(?i)\b(chpasswd)\b[^\n]*",
+  r"(?i)\b(/etc/shadow)\b[^\s]*",
+)
+
 @dataclass(slots=True)
 class ExecutorConfig:
   dry_run: bool = False
@@ -141,9 +155,22 @@ def _normalize_command(command: Sequence[str] | str) -> list[str]:
 def _sanitize_arguments(command: list[str]) -> None:
   if not command:
     raise ValidationError("The command cannot be empty.")
-  if not command[0] or command[0].startswith("-"):
+  raw_binnary = command[0]
+  if not raw_binnary:
     raise ValidationError("Invalid command binary.")
   
+  if "\x00" in raw_binnary:
+    raise ValidationError("Invalid command binary.")
+
+  if not raw_binnary.strip():
+    raise ValidationError("Invalid command binary.")
+
+  binary_for_validation = Path(raw_binnary).name if raw_binnary.startswith(("/", ".")) else raw_binnary.strip()   
+  
+  if not binary_for_validation or binary_for_validation.startswith("-"):
+    raise ValidationError("Invalid command binary.")
+
+
 def _redact_value(value: str) -> str:
   lowered = value.lower()
   if any(pattern in lowered for pattern in SENSITIVE_PATTERNS):
@@ -174,6 +201,12 @@ def _safe_command_repr(command: Sequence[str]) -> list[str]:
 def _minimum_viability_check(command: Sequence[str]) -> None:
   _sanitize_arguments(list(command))
 
+def _is_sensitive_path(path: Path, roots: Sequence[Path]) -> bool:
+  for root in roots:
+    if path == root or root in path.parents:
+      return True
+  return False
+
 def _is_mutating_command(command: Sequence[str]) -> bool:
   binary = Path(command[0]).name
   if binary not in READ_ONLY_BINARIES and binary not in MUTATING_BINARIES:
@@ -199,6 +232,46 @@ def _estimate_impact(command: Sequence[str]) -> tuple[ImpactLevel, list[str], li
 
   if binary == "userdel":
     warnings.append("Deleting users is a high-impact operation.")
+    if "--remove-home" in command:
+      impact = ImpactLevel.CRITICAL
+      warnings.append("Using --remove-home with userdel is critical.")
+  
+  if binary == "rm" and any(arg in {"-r", "-rf", "-fr", "--recursive"} for arg in command):
+    resources.append("recursive delete")
+    for token in command:
+      if not token.startswith("/"):
+        continue
+      token_path = Path(token)
+      if _is_sensitive_path(token_path, SENSITIVE_RECURSIVE_PATHS):
+        impact = ImpactLevel.CRITICAL
+        warnings.append("Recursive deletion on a sensitive path detected.")
+        break
+  
+  if binary in {"mv", "cp"}:
+    destination = next((token for token in reversed(command[1:])  if token.startswith("/")), None)
+    if destination is not None:
+      destination_path = Path(destination)
+      if _is_sensitive_path(destination_path, SENSITIVE_SYSTEM_PATHS):
+        impact = ImpactLevel.HIGH if impact != ImpactLevel.CRITICAL else impact
+        warnings.append("Move/copy destination targets a sensitive system directory.")
+  
+  if binary == "tar":
+    has_extract_flag = any(
+      arg in {"-x", "-xf", "--extract"} or (arg.startswith("-") and "x" in arg[1:])
+      for arg in command[1:]
+    )
+    extract_destination = None
+    for index, token in enumerate(command[1:], start=1):
+      if token in {"-C", "--directory"} and index + 1 < len(command):
+        extract_destination = command[index + 1]
+      elif token.startswith("--directory="):
+        extract_destination = token.split("=", 1)[1]
+    if has_extract_flag and extract_destination and extract_destination.startswith("/"):
+      destination_path = Path(extract_destination)
+      if _is_sensitive_path(destination_path, SENSITIVE_SYSTEM_PATHS):
+        impact = ImpactLevel.CRITICAL if destination_path == Path("/etc") else ImpactLevel.HIGH
+        warnings.append("Tar extraction into a sensitive system path detected.")
+
   
   if binary in {"chmod", "chown"} and any(arg in {"-R", "--recursive"} for arg in command):
     resources.append("recursive permissions")
@@ -529,7 +602,7 @@ class CommandExecutor:
     warnings = list(impact_warnings)
 
     if not dependency_ok:
-      warnings.append(f"The '{binary}' dependency is not available in the PATH.”")
+      warnings.append(f"The '{binary}' dependency is not available in PATH.")
 
     details = dict(audit_details)
     details.update({"timeout": timeout, "dependency_ok": dependency_ok})
@@ -748,10 +821,21 @@ class CommandExecutor:
   def _redact_sensitive_text(self, value: str) -> str:
     if not value:
       return value
-    lowered = value.lower()
-    if any(pattern in lowered for pattern in SENSITIVE_PATTERNS):
-      return "[REDACTED]"
-    return value
+    redacted = value
+    for pattern in REDACTION_REGEX_PATTERNS:
+      redacted = re.sub(pattern, "[REDACTED]", redacted)
+    
+    lines: list[str] = []
+    for line in redacted.splitlines():
+      lowered = line.lower()
+      if any(keyword in lowered for keyword in {"password", "passwd", "token", "secret", "/etc/shadow"}):
+        lines.append("[REDACTED]")
+      else:
+        lines.append(line)
+    
+    if redacted.endswith("\n"):
+      return "\n".join(lines) + "\n"
+    return "\n".join(lines)
   
   def _prepare_command(self, command: Sequence[str] | str) -> list[str]:
     normalized = _normalize_command(command)
