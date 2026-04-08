@@ -56,6 +56,7 @@ HIGH_IMPACT_BINARIES = {
 }
 
 READ_ONLY_BINARIES = {
+  "command",
   "id",
   "getent"
 }
@@ -78,6 +79,8 @@ MUTATING_BINARIES = {
   "mv",
   "rm",
 }
+
+POLICY_BINARIES = frozenset(READ_ONLY_BINARIES | MUTATING_BINARIES)
 
 CRITICAL_KEYWORDS = (
   "/etc/shadow",
@@ -123,27 +126,19 @@ class ExecutorConfig:
   default_env: dict[str, str] = field(default_factory=dict)
   default_cwd: Path | None = None
   allowed_binaries: set[str] = field(
-    default_factory=lambda: {
-      "useradd",
-      "usermod",
-      "userdel",
-      "passwd",
-      "chpasswd",
-      "chage",
-      "groupadd",
-      "groupdel",
-      "groupmod",
-      "gpasswd",
-      "id",
-      "getent",
-      "chmod",
-      "chown",
-      "tar",
-      "cp",
-      "mv",
-      "rm"
-    }
+    default_factory=lambda: set(POLICY_BINARIES)
   )
+
+def __post_init__(self) -> None:
+  expected_allowed_binaries = set(POLICY_BINARIES)
+  if self.allowed_binaries != expected_allowed_binaries:
+    raise ValidationError(
+      "allowed_binaries must match the explicit binary policy union.",
+      details={
+        "expected": sorted(expected_allowed_binaries),
+        "received": sorted(self.allowed_binaries)
+      }
+    )
 
 def _normalize_command(command: Sequence[str] | str) -> list[str]:
   if isinstance(command, str):
@@ -209,15 +204,7 @@ def _is_sensitive_path(path: Path, roots: Sequence[Path]) -> bool:
 
 def _is_mutating_command(command: Sequence[str]) -> bool:
   binary = Path(command[0]).name
-  if binary not in READ_ONLY_BINARIES and binary not in MUTATING_BINARIES:
-    raise PreventiveSecurityError(
-      message="binary without explicit mutability policy.",
-      details={"binary": binary}
-    )
-  
-  if binary in READ_ONLY_BINARIES:
-    return False
-  return True
+  return binary is MUTATING_BINARIES
 
 def _estimate_impact(command: Sequence[str]) -> tuple[ImpactLevel, list[str], list[str]]:
   warnings: list[str] = []
@@ -513,7 +500,7 @@ class CommandExecutor:
         details={"binary": binary}
       )
     
-    if binary not in READ_ONLY_BINARIES and binary not in MUTATING_BINARIES:
+    if binary not in POLICY_BINARIES:
       raise  PreventiveSecurityError(
         message="Binary without explicit mutability policy.",
         details={"binary": binary}
@@ -821,7 +808,7 @@ class CommandExecutor:
       impact_level = ImpactLevel.HIGH
       warnings = ["Operation blocked by preventive security controlls."]
     elif isinstance(error, CommandExecutionError):
-      is_timeout = details.get("reason") = "timeout" or isinstance(getattr(error, "cause", None), subprocess.TimeoutExpired)
+      is_timeout = details.get("reason") == "timeout" or isinstance(getattr(error, "cause", None), subprocess.TimeoutExpired)
       if is_timeout:
         impact_level = ImpactLevel.MEDIUM
         warnings = ["Command execution timed out before completion."]
