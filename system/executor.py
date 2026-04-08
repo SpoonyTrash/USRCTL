@@ -550,7 +550,7 @@ class CommandExecutor:
 
       ok = completed.returncode == 0
       changed = ok and _is_mutating_command(command)
-      message = "The command was executed successfully" if ok else "The command finished with an error."
+      message = "Command completed successfully." if ok else "Command execution failed."
       return self._to_command_result(
         ok=ok,
         action=action,
@@ -645,7 +645,7 @@ class CommandExecutor:
     
     if isinstance(exc, subprocess.TimeoutExpired):
       error = CommandExecutionError(
-        message= "Execution time exceeded.",
+        message= "Command timed out.",
         details= {**details, "timeout": timeout, "reason": "timeout"},
         cause=exc
       )
