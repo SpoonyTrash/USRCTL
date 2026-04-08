@@ -404,7 +404,12 @@ class CommandExecutor:
       impact_level=ImpactLevel.NONE,
       warnings=[] if exists else ["Missing system dependency."],
       affected_resources=[],
-      details={"dependency": binary, "checked_with": "shutil.which"},
+      details={
+        "dependency": binary, 
+        "checked_with": "shutil.which",
+        "operation_kind": "dependency_check",
+        "command_is_pseudo": True
+      },
       changed=False,
       duration_ms=0.0,
       binary=binary
@@ -417,6 +422,10 @@ class CommandExecutor:
     return result
   
   def execute_strict(self, command: Sequence[str] | str, **kwargs: Any) -> CommandResult:
+    requested_dry_run = kwargs.get("dry_run")
+    effective_dry_run = self.config.dry_run if requested_dry_run is None else bool(requested_dry_run)
+    if effective_dry_run:
+      raise ValidationError("execute_strict does not support dry_run=True")
     result = self.execute(command, raise_on_failure=True, **kwargs)
     if isinstance(result, DryRunResult):
       raise ValidationError("execute_strict does not support dry_run=True")
@@ -650,7 +659,7 @@ class CommandExecutor:
     if isinstance(exc, subprocess.TimeoutExpired):
       error = CommandExecutionError(
         message= "Execution time exceeded.",
-        details= {**details, "timeout": timeout},
+        details= {**details, "timeout": timeout, "reason": "timeout"},
         cause=exc
       )
       return self._error_result(error, action, target, command_safe, duration_ms)
@@ -799,6 +808,23 @@ class CommandExecutor:
   ) -> CommandResult:
     stderr = str(error)
     details = getattr(error, "details", {}) or {}
+    impact_level = ImpactLevel.LOW
+    warnings = ["The technical execution produced a controlled error."]
+
+    if isinstance(error, InsufficientPermissionsError):
+      impact_level = ImpactLevel.MEDIUM
+      warnings = ["Execution blocked due to insufficient permissions."]
+    elif isinstance(error, ResourceNotFoundError):
+      impact_level = ImpactLevel.LOW
+      warnings = ["Required resource was not found."]
+    elif isinstance(error, PreventiveSecurityError):
+      impact_level = ImpactLevel.HIGH
+      warnings = ["Operation blocked by preventive security controlls."]
+    elif isinstance(error, CommandExecutionError):
+      is_timeout = details.get("reason") = "timeout" or isinstance(getattr(error, "cause", None), subprocess.TimeoutExpired)
+      if is_timeout:
+        impact_level = ImpactLevel.MEDIUM
+        warnings = ["Command execution timed out before completion."]
 
     return self._to_command_result(
       ok=False,
@@ -809,8 +835,8 @@ class CommandExecutor:
       stdout="",
       stderr=stderr,
       command_safe=command_safe,
-      impact_level=ImpactLevel.LOW,
-      warnings=["The technical execution produced a controlled error."],
+      impact_level=impact_level,
+      warnings=warnings,
       affected_resources=[],
       details=details,
       changed=False,
