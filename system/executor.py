@@ -129,16 +129,16 @@ class ExecutorConfig:
     default_factory=lambda: set(POLICY_BINARIES)
   )
 
-def __post_init__(self) -> None:
-  expected_allowed_binaries = set(POLICY_BINARIES)
-  if self.allowed_binaries != expected_allowed_binaries:
-    raise ValidationError(
-      "allowed_binaries must match the explicit binary policy union.",
-      details={
-        "expected": sorted(expected_allowed_binaries),
-        "received": sorted(self.allowed_binaries)
-      }
-    )
+  def __post_init__(self) -> None:
+    expected_allowed_binaries = set(POLICY_BINARIES)
+    if self.allowed_binaries != expected_allowed_binaries:
+      raise ValidationError(
+        "allowed_binaries must match the explicit binary policy union.",
+        details={
+          "expected": sorted(expected_allowed_binaries),
+          "received": sorted(self.allowed_binaries)
+        }
+      )
 
 def _normalize_command(command: Sequence[str] | str) -> list[str]:
   if isinstance(command, str):
@@ -204,7 +204,7 @@ def _is_sensitive_path(path: Path, roots: Sequence[Path]) -> bool:
 
 def _is_mutating_command(command: Sequence[str]) -> bool:
   binary = Path(command[0]).name
-  return binary is MUTATING_BINARIES
+  return binary in MUTATING_BINARIES
 
 def _estimate_impact(command: Sequence[str]) -> tuple[ImpactLevel, list[str], list[str]]:
   warnings: list[str] = []
