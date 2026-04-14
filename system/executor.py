@@ -150,17 +150,17 @@ def _normalize_command(command: Sequence[str] | str) -> list[str]:
 def _sanitize_arguments(command: list[str]) -> None:
   if not command:
     raise ValidationError("The command cannot be empty.")
-  raw_binnary = command[0]
-  if not raw_binnary:
+  raw_binary = command[0]
+  if not raw_binary:
     raise ValidationError("Invalid command binary.")
   
-  if "\x00" in raw_binnary:
+  if "\x00" in raw_binary:
     raise ValidationError("Invalid command binary.")
 
-  if not raw_binnary.strip():
+  if not raw_binary.strip():
     raise ValidationError("Invalid command binary.")
 
-  binary_for_validation = Path(raw_binnary).name if raw_binnary.startswith(("/", ".")) else raw_binnary.strip()   
+  binary_for_validation = Path(raw_binary).name if raw_binary.startswith(("/", ".")) else raw_binary.strip()   
   
   if not binary_for_validation or binary_for_validation.startswith("-"):
     raise ValidationError("Invalid command binary.")
