@@ -32,12 +32,12 @@ BLOCK_WIDTH = 80
 INDENT = "  "
 BULLET = "-"
 
-VERB_CREATED = "Creado"
-VERB_DELETED = "Eliminado"
-VERB_UPDATED = "Actualizado"
-VERB_VALIDATED = "Validado"
-VERB_SKIPPED = "Omitido"
-VERB_SIMULATED = "Simulado"
+VERB_CREATED = "Created"
+VERB_DELETED = "Deleted"
+VERB_UPDATED = "Updated"
+VERB_VALIDATED = "Validated"
+VERB_SKIPPED = "Skipped"
+VERB_SIMULATED = "Simulated"
 
 SENSITIVE_KEYS = {
     "password",
@@ -251,7 +251,7 @@ class CliOutput:
         level_value = level.value if isinstance(level, ImpactLevel) else str(level)
         self._emit(PREFIX_DRY_RUN, f"Expected impact: {level_value.upper()}")
         if resources:
-            self.info("Potentially affected resourcess", details={"items": list(resources)})
+            self.info("Potentially affected resources", details={"items": list(resources)})
 
     def print_preventive_warnings(self, warnings: Sequence[str]) -> None:
         if not warnings:
@@ -299,7 +299,7 @@ class CliOutput:
         warnings: Sequence[str] | None = None,
     ) -> None:
         self.status_partial(
-            action="exportación",
+            action="export",
             target=file_path,
             message=f"{records} records exported, {failed} failed",
         )
