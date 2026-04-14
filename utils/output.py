@@ -64,6 +64,17 @@ SENSITIVE_PATTERNS = [
 ]
 MAX_TEXT_LENGTH = 600
 
+DETAIL_MINIMAL = "minimal"
+DETAIL_NORMAL = "normal"
+DETAIL_DETAILED = "detailed"
+DETAIL_TECHNICAL = "technical"
+DETAIL_LEVEL_ORDER = {
+    DETAIL_MINIMAL: 0,
+    DETAIL_NORMAL: 1,
+    DETAIL_DETAILED: 2,
+    DETAIL_TECHNICAL: 3
+}
+
 @dataclass(slots=True)
 class OutputConfig:
     quiet: bool = False
@@ -93,20 +104,20 @@ class CliOutput:
     def __init__(self, config: OutputConfig | None = None) -> None:
         self.config = config or OutputConfig()
 
-    def info(self, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        self._emit(PREFIX_INFO, message, details=details)
+    def info(self, message: str, *, details: Mapping[str, Any] | None = None, detail_level: str | None = None) -> None:
+        self._emit(PREFIX_INFO, message, details=details, detail_level=detail_level)
 
-    def success(self, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        self._emit(PREFIX_SUCCESS, message, details=details)
+    def success(self, message: str, *, details: Mapping[str, Any] | None = None, detail_level: str | None = None) -> None:
+        self._emit(PREFIX_SUCCESS, message, details=details, detail_level=detail_level)
 
-    def warning(self, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        self._emit(PREFIX_WARNING, message, details=details)
+    def warning(self, message: str, *, details: Mapping[str, Any] | None = None, detail_level: str | None = None) -> None:
+        self._emit(PREFIX_WARNING, message, details=details, detail_level=detail_level)
 
-    def note(self, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        self._emit(PREFIX_NOTE, message, details=details)
+    def note(self, message: str, *, details: Mapping[str, Any] | None = None, detail_level: str | None = None) -> None:
+        self._emit(PREFIX_NOTE, message, details=details, detail_level=detail_level)
 
-    def error(self, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        self._emit(PREFIX_ERROR, message, details=details, is_error=True)
+    def error(self, message: str, *, details: Mapping[str, Any] | None = None, detail_level: str | None = None) -> None:
+        self._emit(PREFIX_ERROR, message, details=details, is_error=True, detail_level=detail_level)
 
     def status_completed(self, action: str, target: str | None = None, message: str = "") -> None:
         self._print_status_line(STATUS_OK, action, target, message, PREFIX_SUCCESS)
@@ -158,10 +169,11 @@ class CliOutput:
             normalized["prefix"],
             is_error=normalized["is_error"],
         )
+        if self._detail_at_least(DETAIL_DETAILED):
+            self._print_result_complements(result)
 
     def print_result_detailed(self, result: SystemResult) -> None:
         self.print_result_summary(result)
-        self._print_result_complements(result)
     
     def _print_result_complements(self, result: SystemResult) -> None:
 
@@ -175,30 +187,35 @@ class CliOutput:
         if result.changed and result.impact.applied_resources:
             self.success("Applied resources", details={"items": result.impact.applied_resources})
 
-        if self.config.verbose and result.details:
-            self.info("Details", details=result.details)
+        if result.details:
+            self.info("Details", details=result.details, detail_level=DETAIL_DETAILED)
 
-        if self.config.debug and result.execution:
+        if result.execution:
             execution_payload = {
                 "command": result.execution.command,
                 "return_code": result.execution.return_code,
                 "duration_ms": result.execution.duration_ms,
                 "operation_id": result.execution.operation_id,
             }
-            self.info("Technical summary", details=execution_payload)
+            self.info("Technical summary", details=execution_payload, detail_level=DETAIL_TECHNICAL)
 
     def print_result_partial(self, result: SystemResult) -> None:
         self.status_partial(result.action, result.target, result.message)
         self._print_result_complements(result)
+        if self._detail_at_least(DETAIL_DETAILED):
+            self._print_result_complements(result)
+
 
     def print_result_no_changes(self, result: SystemResult) -> None:
         msg = result.message or "Valid operation with no changes applied"
         self.status_skipped(result.action, result.target, msg)
+        if self._detail_at_least(DETAIL_DETAILED):
+            self._print_result_complements(result)
 
     def print_technical_result(self, title: str, payload: Mapping[str, Any]) -> None:
-        if not (self.config.verbose or self.config.debug):
+        if not self._detail_at_least(DETAIL_TECHNICAL):
             return
-        self.info(title, details=dict(payload))
+        self.info(title, details=dict(payload), detail_level=DETAIL_TECHNICAL)
 
     # Métodos públicos de impresión tabular o listados
     def print_list(self, title: str, items: Sequence[Any]) -> None:
@@ -405,6 +422,7 @@ class CliOutput:
         *,
         details: Mapping[str, Any] | None = None,
         is_error: bool = False,
+        detail_level: str | None = None
     ) -> None:
         if self.config.quiet and not is_error:
             return
@@ -413,10 +431,30 @@ class CliOutput:
         styled_prefix = self._style_prefix(prefix, is_error=is_error)
         self._write(f"{styled_prefix} {normalized_message}", is_error=is_error)
 
-        if details and (self.config.verbose or self.config.debug):
+        if details and self._detail_at_least(DETAIL_DETAILED, detail_level=detail_level):
             safe_details = self._sanitize_mapping(details)
             for line in self._format_details(safe_details):
                 self._write(line, is_error=is_error)
+
+    def _normalize_detail_level(self, value: str | None)-> str:
+        candidate = (value or DETAIL_NORMAL).strip().lower()
+        if candidate not in DETAIL_LEVEL_ORDER:
+            return DETAIL_NORMAL
+        return candidate
+    
+    def _effective_detail_level(self, override: str | None = None) -> str:
+        level = self._normalize_detail_level(override or self.config.default_detail_level)
+        if self.config.debug:
+            return DETAIL_TECHNICAL
+        if self.config.verbose and DETAIL_LEVEL_ORDER[level] < DETAIL_LEVEL_ORDER[DETAIL_DETAILED]:
+            return DETAIL_DETAILED
+        return level
+    
+    def _detail_at_least(self, minimum: str, *, detail_level: str | None = None) -> bool:
+        current = self._effective_detail_level(detail_level)
+        required = self._normalize_detail_level(minimum)
+        return DETAIL_LEVEL_ORDER[current] >= DETAIL_LEVEL_ORDER[required]
+        
     
     def _style_prefix(self, prefix: str, *, is_error: bool = False) -> str:
         if not self.config.use_color:
