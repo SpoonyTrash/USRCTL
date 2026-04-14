@@ -17,6 +17,15 @@ PREFIX_DRY_RUN = "[~]"
 PREFIX_NOTE = "[>]"
 PREFIX_CRITICAL = "[!!]"
 
+ANSI_RESET = "\033[0m"
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_BLUE = "\033[34m"
+ANSI_MAGENTA = "\033[35m"
+ANSI_BOLD_RED = "\033[1;31m"
+
+
 STATUS_OK = "OK"
 STATUS_ERROR = "ERROR"
 STATUS_WARNING = "WARNING"
@@ -401,12 +410,30 @@ class CliOutput:
             return
 
         normalized_message = self._normalize_message(message)
-        self._write(f"{prefix} {normalized_message}", is_error=is_error)
+        styled_prefix = self._style_prefix(prefix, is_error=is_error)
+        self._write(f"{styled_prefix} {normalized_message}", is_error=is_error)
 
         if details and (self.config.verbose or self.config.debug):
             safe_details = self._sanitize_mapping(details)
             for line in self._format_details(safe_details):
                 self._write(line, is_error=is_error)
+    
+    def _style_prefix(self, prefix: str, *, is_error: bool = False) -> str:
+        if not self.config.use_color:
+            return prefix
+        
+        if is_error or prefix in {PREFIX_ERROR, PREFIX_CRITICAL}:
+            color = ANSI_BOLD_RED if prefix == PREFIX_CRITICAL else ANSI_RED
+        elif prefix == PREFIX_SUCCESS:
+            color = ANSI_GREEN
+        elif prefix in {PREFIX_WARNING, PREFIX_DRY_RUN}:
+            color = ANSI_YELLOW
+        elif prefix == PREFIX_NOTE:
+            color = ANSI_MAGENTA
+        else:
+            color = ANSI_BLUE
+        return f"{color}{prefix}{ANSI_RESET}"
+        
 
     def _print_header(self, title: str) -> None:
         self._write(self._build_block_header(title))
