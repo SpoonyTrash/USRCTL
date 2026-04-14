@@ -152,6 +152,10 @@ class CliOutput:
 
     def print_result_detailed(self, result: SystemResult) -> None:
         self.print_result_summary(result)
+        self._print_result_complements(result)
+    
+    def _print_result_complements(self, result: SystemResult) -> None:
+
 
         if result.warnings:
             self.warning("Warnings", details={"items": result.warnings})
@@ -176,7 +180,7 @@ class CliOutput:
 
     def print_result_partial(self, result: SystemResult) -> None:
         self.status_partial(result.action, result.target, result.message)
-        self.print_result_detailed(result)
+        self._print_result_complements(result)
 
     def print_result_no_changes(self, result: SystemResult) -> None:
         msg = result.message or "Valid operation with no changes applied"
