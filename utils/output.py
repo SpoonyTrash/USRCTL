@@ -36,7 +36,6 @@ STATUS_SKIPPED = "SKIPPED"
 
 SEPARATOR_HEADER = "="
 SEPARATOR_SECTION = "-"
-SEPARATOR_SUMMARY = "_"
 BLOCK_WIDTH = 80
 INDENT = "  "
 BULLET = "-"
@@ -261,8 +260,9 @@ class CliOutput:
         self.note(message)
 
     def print_collection_summary(self, *, count: int, label: str = "elements") -> None:
-        self._write(SEPARATOR_SUMMARY * BLOCK_WIDTH)
-        self._write(f"{INDENT}Total {label}: {count}")
+        normalized_label = self._sanitize_text(self._normalize_message(label))
+        self._print_header("Summary")
+        self._write(f"{INDENT}Total {normalized_label}: {count}")
 
     def print_dry_run_message(self, action: str, target: str | None = None, message: str = "") -> None:
         base = message or "Simulation executed: no real changes were applied"
