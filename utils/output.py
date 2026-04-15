@@ -50,12 +50,12 @@ SENSITIVE_KEYS = {
     "private_key",
 }
 SENSITIVE_PATTERNS = [
-    (re.compile(r"(?i)\bpassword\s*[:=]\s*\S+"), r"password\1 ***"),
-    (re.compile(r"(?i)\bpasswd\s*[:=]\s*\S+"), r"passwd\1 ***"),
-    (re.compile(r"(?i)\btoken\s*[:=]\s*\S+"), r"token\1 ***"),
-    (re.compile(r"(?i)\bsecret\s*[:=]\s*\S+"), r"secret\1 ***"),
-    (re.compile(r"(?i)\bstdin\s*[:=]\s*\S+"), r"stdin\1 ***"),
-    (re.compile(r"(?i)\bauthorization\s*bearer\s*\S+"), "Authorization: Bearer ***"),
+    (re.compile(r"(?i)\b(password)(\s*[:=]\s*)\S+"), r"\1\2***"),
+    (re.compile(r"(?i)\b(passwd)(\s*[:=]\s*)\S+"), r"\1\2***"),
+    (re.compile(r"(?i)\b(token)(\s*[:=]\s*)\S+"), r"\1\2***"),
+    (re.compile(r"(?i)\b(secret)(\s*[:=]\s*)\S+"), r"\1\2***"),
+    (re.compile(r"(?i)\b(stdin)(\s*[:=]\s*)\S+"), r"\1\2***"),
+    (re.compile(r"(?i)\b(authorization\s*:?\s*bearer\s+)\S+"), r"\1***"),
     (re.compile(r"(?i)/etc/shadow(?:\S*)?"), "***"),
 ]
 
@@ -199,8 +199,6 @@ class CliOutput:
     def print_result_partial(self, result: SystemResult) -> None:
         self.status_partial(result.action, result.target, result.message)
         self._print_result_complements(result)
-        if self._detail_at_least(DETAIL_DETAILED):
-            self._print_result_complements(result)
 
 
     def print_result_no_changes(self, result: SystemResult) -> None:
@@ -214,7 +212,6 @@ class CliOutput:
             return
         self.info(title, details=dict(payload), detail_level=DETAIL_TECHNICAL)
 
-    # Métodos públicos de impresión tabular o listados
     def print_list(self, title: str, items: Sequence[Any]) -> None:
         self._print_header(title)
         if not items:
@@ -374,8 +371,12 @@ class CliOutput:
     def _sanitize_value(self, value: Any) -> Any:
         if isinstance(value, Mapping):
             return self._sanitize_mapping(value)
-        elif isinstance(value, (list, tuple)):
-            return [self._sanitize_text(str(v)) for v in value]
+        elif isinstance(value, list):
+            return [self._sanitize_text(v) for v in value]
+        elif isinstance(value, tuple):
+            return tuple(self._sanitize_value(v) for v in value)
+        elif isinstance(value, set):
+            return {self._sanitize_value(v) for v in value}
         else:
             return self._sanitize_text(str(value))
 
