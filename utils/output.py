@@ -41,13 +41,6 @@ BLOCK_WIDTH = 80
 INDENT = "  "
 BULLET = "-"
 
-VERB_CREATED = "Created"
-VERB_DELETED = "Deleted"
-VERB_UPDATED = "Updated"
-VERB_VALIDATED = "Validated"
-VERB_SKIPPED = "Skipped"
-VERB_SIMULATED = "Simulated"
-
 SENSITIVE_KEYS = {
     "password",
     "passwd",
