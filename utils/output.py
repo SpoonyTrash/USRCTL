@@ -360,16 +360,21 @@ class CliOutput:
     def _sanitize_mapping(self, data: Mapping[str, Any]) -> dict[str, Any]:
         safe: dict[str, Any] = {}
         for key, value in data.items():
-            if key.lower() in SENSITIVE_KEYS:
+            key_name = str(key).lower()
+            if key_name in SENSITIVE_KEYS:
                 safe[key] = "***"
                 continue
-            if isinstance(value, Mapping):
-                safe[key] = self._sanitize_mapping(value)
-            elif isinstance(value, (list, tuple)):
-                safe[key] = [self._sanitize_text(str(v)) for v in value]
-            else:
-                safe[key] = self._sanitize_text(str(value))
+            safe[key] = self._sanitize_value(value)
         return safe
+
+    def _sanitize_value(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return self._sanitize_mapping(value)
+        elif isinstance(value, (list, tuple)):
+            return [self._sanitize_text(str(v)) for v in value]
+        else:
+            return self._sanitize_text(str(value))
+
 
     def _sanitize_text(self, text: str) -> str:
         result = text
