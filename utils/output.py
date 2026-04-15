@@ -195,7 +195,7 @@ class CliOutput:
                 "duration_ms": result.execution.duration_ms,
                 "operation_id": result.execution.operation_id,
             }
-            self.info("Technical summary", details=execution_payload, detail_level=DETAIL_TECHNICAL)
+            self.info("Technical details", details=execution_payload, detail_level=DETAIL_TECHNICAL)
 
     def print_result_partial(self, result: SystemResult) -> None:
         self.status_partial(result.action, result.target, result.message)
@@ -331,7 +331,7 @@ class CliOutput:
             target=file_path,
             message=f"{records} records exported, {failed} failed",
         )
-        self.info("Summary", details={"format": fmt, "records_ok": records, "records_error": failed})
+        self.info("Export summary", details={"format": fmt, "records_ok": records, "records_error": failed})
         if warnings:
             self.warning("Warnings", details={"items": list(warnings)})
 
@@ -361,7 +361,6 @@ class CliOutput:
             return self._truncate(self._sanitize_text(json.dumps(value, ensure_ascii=False, default=str)))
         return self._truncate(self._sanitize_text(str(value)))
 
-    # Métodos internos de saneamiento de salida
     def _sanitize_mapping(self, data: Mapping[str, Any]) -> dict[str, Any]:
         safe: dict[str, Any] = {}
         for key, value in data.items():
@@ -392,7 +391,6 @@ class CliOutput:
             return text
         return f"{text[: max_len - 3]}..."
 
-    # Conversión desde errores y resultados del dominio
     def _from_domain_error(self, err: UsrCtlError) -> dict[str, Any]:
         payload = err.to_dict()
         details = payload.get("details") or {}
