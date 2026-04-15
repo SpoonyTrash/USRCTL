@@ -51,10 +51,15 @@ SENSITIVE_KEYS = {
     "private_key",
 }
 SENSITIVE_PATTERNS = [
-    re.compile(r"(?i)password\s*=\s*\S+"),
-    re.compile(r"(?i)token\s*=\s*\S+"),
-    re.compile(r"(?i)secret\s*=\s*\S+"),
+    (re.compile(r"(?i)\bpassword\s*[:=]\s*\S+"), r"password\1 ***"),
+    (re.compile(r"(?i)\bpasswd\s*[:=]\s*\S+"), r"passwd\1 ***"),
+    (re.compile(r"(?i)\btoken\s*[:=]\s*\S+"), r"token\1 ***"),
+    (re.compile(r"(?i)\bsecret\s*[:=]\s*\S+"), r"secret\1 ***"),
+    (re.compile(r"(?i)\bstdin\s*[:=]\s*\S+"), r"stdin\1 ***"),
+    (re.compile(r"(?i)\bauthorization\s*bearer\s*\S+"), "Authorization: Bearer ***"),
+    (re.compile(r"(?i)/etc/shadow(?:\S*)?"), "***"),
 ]
+
 MAX_TEXT_LENGTH = 600
 
 DETAIL_MINIMAL = "minimal"
@@ -378,8 +383,8 @@ class CliOutput:
 
     def _sanitize_text(self, text: str) -> str:
         result = text
-        for pattern in SENSITIVE_PATTERNS:
-            result = pattern.sub("***", result)
+        for pattern, replacement in SENSITIVE_PATTERNS:
+            result = pattern.sub(replacement, result)
         return result.replace("\n", " ").strip()
 
     def _truncate(self, text: str, *, max_len: int = MAX_TEXT_LENGTH) -> str:
