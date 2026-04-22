@@ -166,7 +166,7 @@ class ConfirmationManager:
     ) -> ConfirmationResult:
         if risk_level not in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
             raise ValidationError(
-                message="confirm_high_impact requires risk_level HIGH ir CRITICAL"
+                message="confirm_high_impact requires risk_level HIGH or CRITICAL"
             )
         return self._run_reinforced_flow(
             action=action,
@@ -449,7 +449,7 @@ class ConfirmationManager:
 
         if effective_default not in {DEFAULT_ANSWER_YES, DEFAULT_ANSWER_NO}:
             raise ValidationError(
-                message="default_answer must eb 'yes' or 'no'"
+                message="default_answer must be 'yes' or 'no'"
             )
         if (
             self.config.strict_critical 
@@ -457,7 +457,7 @@ class ConfirmationManager:
             and effective_default != DEFAULT_ANSWER_NO
         ):
             raise PreventiveSecurityError(
-                message="Critical confirmations requre default answer 'no' whn strict_critical is enabled."
+                message="Critical confirmations requre default answer 'no' when strict_critical is enabled."
             )
 
         prompt = self._build_yes_no_prompt(
@@ -518,8 +518,8 @@ class ConfirmationManager:
 
             if self._output and not self.config.silent:
                 self._output.warning(
-                    f"Envalid input ({attempt}/{self.config.max_attempts})"
-                    "Please respond explicity with yes/no."
+                    f"Invalid input ({attempt}/{self.config.max_attempts})"
+                    "Please respond explicitly with yes/no."
                 )
         
         return self.build_aborted_result(
