@@ -103,11 +103,7 @@ class ConfirmationManager:
         impact: str | None = None,
         warning: str | None = None
     ) -> ConfirmationResult:
-        normalized_default = {
-            self._validate_default_answer(default_answer)
-            if default_answer is not None
-            else None
-        }
+        normalized_default = default_answer
 
         return self._run_yes_no_flow(
             kind=ConfirmationKind.SIMPLE,
@@ -129,11 +125,8 @@ class ConfirmationManager:
         default_answer: str | None = None,
         risk_level: RiskLevel = RiskLevel.MEDIUM
     ) -> ConfirmationResult:
-        normalized_default = {
-            self._validate_default_answer(default_answer)
-            if default_answer is not None
-            else None
-        }
+        normalized_default = default_answer
+
         return self._run_yes_no_flow(
             kind=ConfirmationKind.CONTEXTUAL,
             action=action,
@@ -153,11 +146,7 @@ class ConfirmationManager:
         warning: str,
         default_answer: str | None = None,
     ) -> ConfirmationResult:
-        normalized_default = {
-            self._validate_default_answer(default_answer)
-            if default_answer is not None
-            else None
-        }
+        normalized_default = default_answer
         return self._run_yes_no_flow(
             kind=ConfirmationKind.SIMPLE,
             action=action,
@@ -225,11 +214,7 @@ class ConfirmationManager:
         dry_run: bool = False,
         default_answer: str | None = None
     ) -> ConfirmationResult:
-        normalized_default = {
-            self._validate_default_answer(default_answer)
-            if default_answer is not None
-            else None
-        }
+        normalized_default = default_answer
         extra_warnings = list(warnings or [])
         if side_effects:
             extra_warnings.append(
@@ -475,17 +460,13 @@ class ConfirmationManager:
     ) -> ConfirmationResult:
         effective_default = self._validate_default_answer(default_answer if default_answer is not None else self.config.default_answer)
 
-        if effective_default not in {DEFAULT_ANSWER_YES, DEFAULT_ANSWER_NO}:
-            raise ValidationError(
-                message="default_answer must be 'yes' or 'no'"
-            )
         if (
             self.config.strict_critical 
             and risk_level is RiskLevel.CRITICAL
             and effective_default != DEFAULT_ANSWER_NO
         ):
             raise PreventiveSecurityError(
-                message="Critical confirmations requre default answer 'no' when strict_critical is enabled."
+                message="Critical confirmations require default answer 'no' when strict_critical is enabled."
             )
 
         prompt = self._build_yes_no_prompt(
@@ -543,11 +524,7 @@ class ConfirmationManager:
                     attempts_used=attempt
                 )
 
-            if self._output and not self.config.silent:
-                self._output.warning(
-                    f"Invalid input ({attempt}/{self.config.max_attempts})"
-                    "Please respond explicitly with yes/no."
-                )
+            self._emit_invalid_input_warning()
         
         return self.build_aborted_result(
             kind=kind,
@@ -555,6 +532,13 @@ class ConfirmationManager:
             prompt=prompt,
             attempts_used=self.config.max_attempts
         )
+    
+    def _emit_invalid_input_warning(self, attempt: int) -> None:
+        if self._output and not self.config.silent:
+            self._output.warning(
+                f"Invalid input ({attempt}/{self.config.max_attempts}). "
+                "Please respond explicitly with yes or no."
+            )
     
     def _run_reinforced_flow(
         self,
