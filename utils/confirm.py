@@ -346,7 +346,7 @@ class ConfirmationManager:
                 if warn:
                     lines.append(f"Warning: {warn}")
         
-        lines.append(f"Do you confirm to continue? [{default_token}]")
+        lines.append(f"Do you want to continue? [{default_token}]")
         return "\n".join(lines) + " "
     
     def _build_reinforced_prompt(
@@ -372,7 +372,7 @@ class ConfirmationManager:
         ]
 
         if impact:
-            lines.append(f"impact: {impact}")
+            lines.append(f"Impact: {impact}")
         if irreversible:
             lines.append("Irreversible: yes. This action may be destructive.")
         if warnings:
@@ -510,8 +510,7 @@ class ConfirmationManager:
                 kind=kind,
                 risk_level=risk_level,
                 reason=(
-                    "Non-interactive mode: explicit confirmation or"
-                    "an equivalent authorization flag is required."
+                    "Non-interactive mode requires explicit confirmation or an equivalent authorization flag."
                 ),
                 prompt=prompt
             )
@@ -582,8 +581,7 @@ class ConfirmationManager:
                 kind=ConfirmationKind.REINFORCED,
                 risk_level=risk_level,
                 reason=(
-                    "Non-interactive: reinforced actions require"
-                    "secure explicit authorization."
+                    "Non-interactive mode requires secure explicit authorization for reinforced confirmations."
                 ),
                 prompt=prompt
             )
