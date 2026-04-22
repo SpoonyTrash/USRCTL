@@ -103,12 +103,18 @@ class ConfirmationManager:
         impact: str | None = None,
         warning: str | None = None
     ) -> ConfirmationResult:
+        normalized_default = {
+            self._validate_default_answer(default_answer)
+            if default_answer is not None
+            else None
+        }
+
         return self._run_yes_no_flow(
             kind=ConfirmationKind.SIMPLE,
             action=action,
             target=target,
             risk_level=risk_level,
-            default_answer=default_answer,
+            default_answer=normalized_default,
             impact=impact,
             warnings=[warning] if warning else None,
             dry_run=False
@@ -123,12 +129,17 @@ class ConfirmationManager:
         default_answer: str | None = None,
         risk_level: RiskLevel = RiskLevel.MEDIUM
     ) -> ConfirmationResult:
+        normalized_default = {
+            self._validate_default_answer(default_answer)
+            if default_answer is not None
+            else None
+        }
         return self._run_yes_no_flow(
             kind=ConfirmationKind.CONTEXTUAL,
             action=action,
             target=target,
             risk_level=risk_level,
-            default_answer=default_answer,
+            default_answer=normalized_default,
             impact=impact,
             warnings=None,
             dry_run=False
@@ -142,12 +153,17 @@ class ConfirmationManager:
         warning: str,
         default_answer: str | None = None,
     ) -> ConfirmationResult:
+        normalized_default = {
+            self._validate_default_answer(default_answer)
+            if default_answer is not None
+            else None
+        }
         return self._run_yes_no_flow(
             kind=ConfirmationKind.SIMPLE,
             action=action,
             target=target,
             risk_level=RiskLevel.MEDIUM,
-            default_answer=default_answer,
+            default_answer=normalized_default,
             impact=None,
             warnings=[warning],
             dry_run=False
@@ -208,6 +224,11 @@ class ConfirmationManager:
         dry_run: bool = False,
         default_answer: str | None = None
     ) -> ConfirmationResult:
+        normalized_default = {
+            self._validate_default_answer(default_answer)
+            if default_answer is not None
+            else None
+        }
         extra_warnings = list(warnings or [])
         if side_effects:
             extra_warnings.append(
@@ -219,7 +240,7 @@ class ConfirmationManager:
             action=action,
             target=target,
             risk_level=risk_level,
-            default_answer=default_answer,
+            default_answer=normalized_default,
             impact=impact,
             warnings=extra_warnings,
             dry_run=dry_run
@@ -406,6 +427,12 @@ class ConfirmationManager:
         if not expected_text.strip():
             raise PreventiveSecurityError(message="Reinforced confirmation requires explicit expected text.")
 
+    def _validate_default_answer(self, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {DEFAULT_ANSWER_YES, DEFAULT_ANSWER_NO}:
+            raise ValidationError(message="default_answer must be 'yes' or 'no'")
+        return normalized
+
     
     def _default_token(self, default_answer: str) -> str:
         if default_answer == DEFAULT_ANSWER_YES:
@@ -445,7 +472,7 @@ class ConfirmationManager:
         warnings: Sequence[str] | None,
         dry_run: bool
     ) -> ConfirmationResult:
-        effective_default = default_answer or self.config.default_answer
+        effective_default = self._validate_default_answer(default_answer if default_answer is not None else self.config.default_answer)
 
         if effective_default not in {DEFAULT_ANSWER_YES, DEFAULT_ANSWER_NO}:
             raise ValidationError(
