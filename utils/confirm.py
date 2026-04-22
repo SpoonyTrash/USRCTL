@@ -19,6 +19,7 @@ MSG_ABORTED_INVALID = "Operation aborted due to repeated invalid inputs."
 MSG_BLOCKED_POLICY = "Operation blocked by confirmation policy."
 MSG_CONTINUE_APPROVED = "Confirmation accepted. You may proceed with the operation."
 MSG_CONTINUE_REJECTED = "Operation canceled by the operator."
+MSG_INVALID_INPUT = "Please respond explicitly with yes or no."
 
 @dataclass(slots=True)
 class ConfirmationConfig:
@@ -320,6 +321,18 @@ class ConfirmationManager:
         warnings: Sequence[str] | None,
         dry_run: bool,
     ) -> str:
+        """
+        Build the standard yes/no confirmation prompt.
+
+        The prompt must always include:
+        - action
+        - target
+        - rendered risk label
+        - optional impact
+        - execution mode
+        - optional warnings
+        - explicit confirmation question with default token
+        """
         self._validate_prompt_inputs(action=action, target=target)
         default_token = self._default_token(default_answer)
         risk_label = RISK_DISPLAY[risk_level]
@@ -334,7 +347,7 @@ class ConfirmationManager:
                 if warn:
                     lines.append(f"Warning: {warn}")
         
-        lines.append(f"Do you want to confirm this operation? [{default_token}]")
+        lines.append(f"Do you confirm this operation? [{default_token}]")
         return "\n".join(lines) + " "
     
     def _build_reinforced_prompt(
@@ -448,6 +461,19 @@ class ConfirmationManager:
             metadata=dict(metadata or {})
         )
     
+    def _base_confirmation_metadata(
+        self,
+        *,
+        kind: ConfirmationKind,
+        risk_level: RiskLevel,
+        interactive: bool,
+    ) -> dict[str, str]:
+        return {
+            "flow": kind.value,
+            "risk_level": risk_level.value,
+            "mode": "interactive" if interactive else "non_interactive",
+        }
+    
     def _run_yes_no_flow(
         self,
         *,
@@ -468,7 +494,12 @@ class ConfirmationManager:
             and effective_default != DEFAULT_ANSWER_NO
         ):
             raise PreventiveSecurityError(
-                message="Critical confirmations require default answer 'no' when strict_critical is enabled."
+                message="Critical confirmations require default answer 'no' when strict_critical is enabled.",
+                details={
+                    "risk_level": risk_level.value,
+                    "default_answer": effective_default,
+                    "strict_critical": "true",
+                }
             )
 
         prompt = self._build_yes_no_prompt(
@@ -483,20 +514,33 @@ class ConfirmationManager:
         
         if not self.config.interactive:
             if self.config.non_interactive_auto_confirm:
+                metadata = self._base_confirmation_metadata(
+                    kind=kind,
+                    risk_level=risk_level,
+                    interactive=False,
+                )
+                metadata["auto_confirm"] = "true"
                 return self._result(
                     state=ConfirmationState.CONFIRMED,
                     risk_level=risk_level,
                     kind=kind,
                     reason="Confirmation auto-authorized by non-interactive policy.",
-                    prompt=prompt
+                    prompt=prompt,
+                    metadata=metadata
                 )
+            metadata = self._base_confirmation_metadata(
+                kind=kind,
+                risk_level=risk_level,
+                interactive=False,
+            )
             return self.build_policy_blocked_result(
                 kind=kind,
                 risk_level=risk_level,
                 reason=(
                     "Non-interactive mode requires explicit confirmation or an equivalent authorization flag."
                 ),
-                prompt=prompt
+                prompt=prompt,
+                metadata=metadata
             )
         
         if self._output and not self.config.silent:
@@ -516,6 +560,11 @@ class ConfirmationManager:
                     attempts_used=attempt,
                     reason=MSG_CONTINUE_APPROVED,
                     prompt=prompt,
+                    metadata={
+                        "flow": kind.value,
+                        "mode": "interactive",
+                        "default_answer": effective_default,
+                    }
                 )
             
             if decision is False:
@@ -538,8 +587,7 @@ class ConfirmationManager:
     def _emit_invalid_input_warning(self, attempt: int) -> None:
         if self._output and not self.config.silent:
             self._output.warning(
-                f"Invalid input ({attempt}/{self.config.max_attempts}). "
-                "Please respond explicitly with yes or no."
+                f"Invalid input ({attempt}/{self.config.max_attempts}). {MSG_INVALID_INPUT}"
             )
     
     def _run_reinforced_flow(
@@ -564,13 +612,19 @@ class ConfirmationManager:
         )
 
         if not self.config.interactive:
+            metadata = self._base_confirmation_metadata(
+                kind=ConfirmationKind.REINFORCED,
+                risk_level=risk_level,
+                interactive=False,
+            )
             return self.build_policy_blocked_result(
                 kind=ConfirmationKind.REINFORCED,
                 risk_level=risk_level,
                 reason=(
                     "Non-interactive mode requires secure explicit authorization for reinforced confirmations."
                 ),
-                prompt=prompt
+                prompt=prompt,
+                metadata=metadata
             )
         
         if self._output and not self.config.silent:
@@ -582,6 +636,13 @@ class ConfirmationManager:
         for attempt in range(1, self.config.max_attempts + 1):
             entered = self._input(prompt).strip()
             if entered == expected:
+                metadata = self._base_confirmation_metadata(
+                    kind=ConfirmationKind.REINFORCED,
+                    risk_level=risk_level,
+                    interactive=True,
+                )
+                metadata["expected_text"] = expected
+
                 return self._result(
                     state=ConfirmationState.CONFIRMED,
                     risk_level=risk_level,
@@ -589,7 +650,7 @@ class ConfirmationManager:
                     reason=MSG_CONTINUE_APPROVED,
                     attempts_used=attempt,
                     prompt=prompt,
-                    metadata={"expected_text": expected}
+                    metadata=metadata
                 )
             
             if self._output and not self.config.silent:
