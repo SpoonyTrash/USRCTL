@@ -171,7 +171,7 @@ class ConfirmationManager:
     ) -> ConfirmationResult:
         if risk_level not in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
             raise ValidationError(
-                message="confirm_high_impact requires risk_level HIGH or CRITICAL",
+                message="confirm_high_impact requires risk_level HIGH or CRITICAL.",
                 details={"risk_level": risk_level.value}
             )
         return self._run_reinforced_flow(
@@ -277,6 +277,7 @@ class ConfirmationManager:
         risk_level: RiskLevel,
         reason: str = MSG_BLOCKED_POLICY,
         prompt: str = "",
+        metadata: Mapping[str, str] | None = None
     ) -> ConfirmationResult:
         return self._result(
             state=ConfirmationState.POLICY_BLOCKED,
@@ -284,6 +285,7 @@ class ConfirmationManager:
             risk_level=risk_level,
             reason=reason,
             prompt=prompt,
+            metadata=metadata
         )
     
     def ensure_confirmed(self, result: ConfirmationResult) -> None:
