@@ -313,8 +313,8 @@ class ConfirmationManager:
     ) -> str:
         self._validate_prompt_inputs(action=action, target=target)
         default_token = self._default_token(default_answer)
-        risk_label = RISK_DISPLAY[risk_label]
-        lines = [f"Action: {action}", f"Target: {target}", f"Level: {risk_level}"]
+        risk_label = RISK_DISPLAY[risk_level]
+        lines = [f"Action: {action}", f"Target: {target}", f"Level: {risk_label}"]
 
         if impact:
             lines.append(f"Impact: {impact}")
@@ -497,7 +497,6 @@ class ConfirmationManager:
             decision = self._normalize_yes_no_response(
                 raw,
                 default_answer=effective_default,
-                risk_level=risk_level
             )
             if decision is True:
                 return self._result(
