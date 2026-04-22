@@ -526,7 +526,7 @@ class ConfirmationManager:
                     attempts_used=attempt
                 )
 
-            self._emit_invalid_input_warning()
+            self._emit_invalid_input_warning(attempt)
         
         return self.build_aborted_result(
             kind=kind,
