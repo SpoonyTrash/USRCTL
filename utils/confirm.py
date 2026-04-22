@@ -15,7 +15,7 @@ SAFE_DEFAULT_ANSWER = DEFAULT_ANSWER_NO
 RISK_HIGH = "[HIGH RISK]"
 RISK_TAG_CRITICAL = "[CRITICAL]"
 
-MSG_ABORTED_INVALID = "Operation aborted due to repeated invalild inputs."
+MSG_ABORTED_INVALID = "Operation aborted due to repeated invalid inputs."
 MSG_BLOCKED_POLICY = "Operation blocked by confirmation policy."
 MSG_CONTINUE_APPROVED = "Confirmation accepted. You may proceed with the operation."
 MSG_CONTINUE_REJECTED = "Operation canceled by the operator."
@@ -124,7 +124,7 @@ class ConfirmationManager:
         risk_level: RiskLevel = RiskLevel.MEDIUM
     ) -> ConfirmationResult:
         return self._run_yes_no_flow(
-            kind=ConfirmationKind.SIMPLE,
+            kind=ConfirmationKind.CONTEXTUAL,
             action=action,
             target=target,
             risk_level=risk_level,
@@ -159,11 +159,15 @@ class ConfirmationManager:
         action: str,
         target: str,
         expected_text: str,
-        risk_level: RiskLevel.HIGH,
+        risk_level: RiskLevel,
         impact: str | None = None,
         warnings: Sequence[str] | None = None,
         irreversible: bool = False
     ) -> ConfirmationResult:
+        if risk_level not in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
+            raise ValidationError(
+                message="confirm_high_impact requires risk_level HIGH ir CRITICAL"
+            )
         return self._run_reinforced_flow(
             action=action,
             target=target,
@@ -307,10 +311,10 @@ class ConfirmationManager:
         warnings: Sequence[str] | None,
         dry_run: bool,
     ) -> str:
-        self._build_yes_no_prompt(action=action, target=target)
+        self._validate_prompt_inputs(action=action, target=target)
         default_token = self._default_token(default_answer)
         risk_label = RISK_DISPLAY[risk_label]
-        lines = [f"Action: {action}", f"Target: {target}", f"Level: {risk_label}"]
+        lines = [f"Action: {action}", f"Target: {target}", f"Level: {risk_level}"]
 
         if impact:
             lines.append(f"Impact: {impact}")
@@ -352,7 +356,7 @@ class ConfirmationManager:
             lines.append("Irreversible: yes. This action may be destructive.")
         if warnings:
             for warn in warnings:
-                if warn in warnings:
+                if warn:
                     lines.append(f"Warning: {warn}")
         
         lines.append(f"Type exactly '{expected_text}' to confirm")
@@ -369,7 +373,6 @@ class ConfirmationManager:
         raw: str,
         *,
         default_answer: str,
-        risk_level: RiskLevel
     ) -> bool | None:
         normalized = self._normalize_response(raw)
 
@@ -379,9 +382,6 @@ class ConfirmationManager:
             return True
         if normalized in NO_ANSWERS:
             return False
-        
-        if risk_level in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
-            return None
         
         return None
 
@@ -446,6 +446,20 @@ class ConfirmationManager:
         dry_run: bool
     ) -> ConfirmationResult:
         effective_default = default_answer or self.config.default_answer
+
+        if effective_default not in {DEFAULT_ANSWER_YES, DEFAULT_ANSWER_NO}:
+            raise ValidationError(
+                message="default_answer must eb 'yes' or 'no'"
+            )
+        if (
+            self.config.strict_critical 
+            and risk_level is RiskLevel.CRITICAL
+            and effective_default != DEFAULT_ANSWER_NO
+        ):
+            raise PreventiveSecurityError(
+                message="Critical confirmations requre default answer 'no' whn strict_critical is enabled."
+            )
+
         prompt = self._build_yes_no_prompt(
             action=action,
             target=target,
