@@ -182,7 +182,8 @@ class ConfirmationManager:
     ) -> ConfirmationResult:
         if risk_level not in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
             raise ValidationError(
-                message="confirm_high_impact requires risk_level HIGH or CRITICAL"
+                message="confirm_high_impact requires risk_level HIGH or CRITICAL",
+                details={"risk_level": risk_level.value}
             )
         return self._run_reinforced_flow(
             action=action,
