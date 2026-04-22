@@ -334,7 +334,7 @@ class ConfirmationManager:
                 if warn:
                     lines.append(f"Warning: {warn}")
         
-        lines.append(f"Do you want confirm this operation? [{default_token}]")
+        lines.append(f"Do you want to confirm this operation? [{default_token}]")
         return "\n".join(lines) + " "
     
     def _build_reinforced_prompt(
