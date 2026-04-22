@@ -332,7 +332,7 @@ class ConfirmationManager:
                 if warn:
                     lines.append(f"Warning: {warn}")
         
-        lines.append(f"Do you want to continue? [{default_token}]")
+        lines.append(f"Do you want confirm this operation? [{default_token}]")
         return "\n".join(lines) + " "
     
     def _build_reinforced_prompt(
@@ -414,7 +414,7 @@ class ConfirmationManager:
             raise PreventiveSecurityError(message="Reinforced confirmation requires explicit expected text.")
 
     def _validate_default_answer(self, value: str) -> str:
-        normalized = value.strip().lower()
+        normalized = (value or self.config.default_answer).strip().lower()
         if normalized not in {DEFAULT_ANSWER_YES, DEFAULT_ANSWER_NO}:
             raise ValidationError(message="default_answer must be 'yes' or 'no'")
         return normalized
@@ -458,7 +458,7 @@ class ConfirmationManager:
         warnings: Sequence[str] | None,
         dry_run: bool
     ) -> ConfirmationResult:
-        effective_default = self._validate_default_answer(default_answer if default_answer is not None else self.config.default_answer)
+        effective_default = self._validate_default_answer(default_answer)
 
         if (
             self.config.strict_critical 
