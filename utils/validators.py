@@ -777,6 +777,8 @@ def _is_protected_path(path_value: str) -> bool:
         protected_obj = Path(protected)
         if path_obj == protected_obj:
             return True
+        if str(protected_obj) == "/":
+            continue
         if protected_obj in path_obj.parents:
             return True
     return False
