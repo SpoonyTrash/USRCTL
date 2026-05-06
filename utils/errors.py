@@ -158,6 +158,12 @@ class UserNotInGroupError(GroupError):
     error_code = "USER_NOT_IN_GROUP"
     exit_code = EXIT_CODE_NOT_FOUND
 
+class InvalidGidError(GroupError):
+    message = "Invalid or conflicting GID"
+    error_code = "INVALID_GID"
+    exit_code = EXIT_CODE_VALIDATION
+
+
 class GroupMembershipError(GroupError):
     message = "Group membership error."
     error_code = "GROUP_MEMBERSHIP_ERROR"

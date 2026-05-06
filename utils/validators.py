@@ -22,7 +22,8 @@ from utils.errors import (
     InvalidLimitError,
     LimitsConsistencyError,
     BackupVersioningError,
-    InvalidTemplateError
+    InvalidTemplateError,
+    InvalidGidError
 )
 
 ALLOWED_EXPORT_FORMATS = {"json", "csv"}
@@ -171,9 +172,9 @@ def validate_positive_int(value: Any, field_name: str, *, allow_zero: bool = Fal
 def validate_gid(gid: Any, *, allow_system_gid: bool = False) -> int:
     value = validate_int(gid, "gid")
     if value < GID_MIN or value > GID_MAX:
-        raise  GroupMembershipError(f"GID must be between {GID_MIN} and {GID_MAX}.", details={"gid": value})
+        raise  InvalidGidError(f"GID must be between {GID_MIN} and {GID_MAX}.", details={"gid": value})
     if not allow_system_gid and value <= RESERVED_ID_MAX:
-        raise GroupMembershipError("System-reserved GID range is not allowed.", details={"gid": value})
+        raise InvalidGidError("System-reserved GID range is not allowed.", details={"gid": value})
     return value
 
 def validate_uid(uid: Any, *, allow_system_uid: bool = False) -> int:
