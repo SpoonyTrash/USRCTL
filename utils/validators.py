@@ -302,7 +302,7 @@ def validate_user_delete_operation(
             details={"username": user}
         )
     if remove_home and not backup_before_delete:
-        raise DangerousImpactError("Deleting home without backup is blocked by defalut.", details={"username": user})
+        raise DangerousImpactError("Deleting home without backup is blocked by default.", details={"username": user})
     return {
         "username": user,
         "remove_home": remove_home,
@@ -469,7 +469,7 @@ def validate_password_option_compatibility(*, password: str | None, generate: bo
 def validate_secret_input(secret: Any, *, field_name: str = "secret") -> str:
     value = validate_non_empty_string(secret, field_name)
     if value.lower() in {"password", "123456", "admin", "qwerty"}:
-        raise WeakPasswordError("Secret is too predectible.", details={"field": field_name})
+        raise WeakPasswordError("Secret is too predictable.", details={"field": field_name})
     if any(c in value for c in ("\x00", "\n", "\r")):
         raise WeakPasswordError("Secret contains invalid control characters.", details={"field": field_name})
     return value
@@ -525,7 +525,7 @@ def validate_policy_combination(
 def validate_limits_profile(*, subject: Any, limits: Mapping[str, Any]) -> dict[str, Any]:
     subject_name = validate_internal_name(subject, field_name="subject")
     if not isinstance(limits, Mapping):
-        raise InvalidLimitError("limits profle must ve  mapping.")
+        raise InvalidLimitError("limits profile must be mapping.")
     
     normalized: dict[str, Any] = {"subject": subject_name}
     if "max_processes" in limits:
@@ -672,7 +672,7 @@ def validate_template_base_files(files: Sequence[Any]) -> list[str]:
     paths = validate_paths_list(files, must_exist=False)
     for p in paths:
         if Path(p).name.startswith(".") is False:
-            raise InvalidTemplateError("Template basse file should be dotfile-style.", details={"file": p})
+            raise InvalidTemplateError("Template base file should be dotfile-style.", details={"file": p})
     return paths
     
 def validate_template_groups(groups: Sequence[Any]) -> list[str]:
@@ -688,7 +688,7 @@ def validate_template_name(value: Any) -> str:
 
 def validate_template_permissions(permissions: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(permissions, Mapping) or not permissions:
-        raise InvalidTemplateError("template permissions must be a non-empty string.")
+        raise InvalidTemplateError("template permissions must be a non-empty mapping/dict.")
     normalized: dict[str, str] = {}
     for target, mode in permissions.items():
         target_name = validate_internal_name(target, field_name="permissions_target")
@@ -763,9 +763,13 @@ def _dedupe_preserve_order(values: Sequence[Any]) -> list[Any]:
     seen: set[Any] = set()
     result: list[Any] = []
     for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
+        try:
+            if value in seen:
+                continue
+            seen.add(value)
+        except TypeError:
+            if any(existing == value for existing in result):
+                continue
         result.append(value)
     return result
 
