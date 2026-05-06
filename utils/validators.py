@@ -245,7 +245,7 @@ def validate_account_lock_operation(*, username: Any, lock: bool, unlock: bool) 
     return {"username": user, "lock": lock, "unlock": unlock}
 
 def validate_assignable_groups(groups: Sequence[Any]) -> list[str]:
-    normalized = validate_groups_list(groups)
+    normalized = validate_groups_list(groups, allow_reserved=True)
     return normalized
 
 def validate_home_directory(home: Any, *, must_exist: bool = False) -> str:
@@ -331,8 +331,8 @@ def validate_members_list(members: Sequence[Any]) -> list[str]:
     return _dedupe_preserve_order(names)
 
 
-def validate_groups_list(groups: Sequence[Any]) -> list[str]:
-    names = [validate_groupname(g, allow_reserved=True) for g in validate_non_empty_list(groups, "groups")]
+def validate_groups_list(groups: Sequence[Any], *, allow_reserved: bool = True) -> list[str]:
+    names = [validate_groupname(g, allow_reserved=allow_reserved) for g in validate_non_empty_list(groups, "groups")]
     deduped = _dedupe_preserve_order(names)
     return deduped
 
@@ -355,7 +355,9 @@ def validate_safe_home_path(path_value: Any) -> str:
     normalized = validate_absolute_path(path_value, field_name="home")
     if _is_protected_path(normalized):
         raise PathValidationError("Home path cannot be a protected system path.", details={"home": normalized})
-    if not normalized.startswith("/home/") and not normalized.startswith("/srv/home"):
+    home_path = Path(normalized)
+    allowed_roots = (Path("/home"), Path("/srv/home"))
+    if not any(home_path == root or root in home_path.parents for root in allowed_roots):
         raise PathValidationError("Home path must be under /home or /srv/home.", details={"home": normalized})
     return normalized
 
@@ -458,9 +460,10 @@ def validate_password_not_empty(password: Any) -> str:
     return value
 
 def validate_password_option_compatibility(*, password: str | None, generate: bool) -> None:
-    if generate and password:
+    generate_value = validate_bool_flag(generate, "generate")
+    if generate_value and password:
         raise ValidationError("Password text is incompatible with generate option.")
-    if not generate and not password:
+    if not generate_value and not password:
         raise ValidationError("Password text is required when generate is false.")
     
 def validate_secret_input(secret: Any, *, field_name: str = "secret") -> str:
@@ -767,9 +770,9 @@ def _dedupe_preserve_order(values: Sequence[Any]) -> list[Any]:
     return result
 
 def _normalize_path(path_value: str) -> str:
-    expanded = str(Path(path_value).expanduser())
-    normalized = str(Path(expanded))
-    return normalized.rstrip("/") or "/"
+    expanded = Path(path_value).expanduser()
+    normalized = expanded.resolve(strict=False)
+    return str(normalized).rstrip("/") or "/"
 
 def _is_protected_path(path_value: str) -> bool:
     path_obj = Path(path_value)
