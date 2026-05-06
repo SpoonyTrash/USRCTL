@@ -119,6 +119,12 @@ RESERVED_USERNAMES = {
 
 RESERVED_BACKUP_TARGETS = {"/", "/etc", "/bin", "/usr", "/root", "/boot"}
 
+ALLOWED_BACKUP_ROOTS = {
+    "/var/backups/usrctl",
+    "/srv/usrctl/backups",
+    "/home",
+}
+
 def validate_bool_flag(value: Any, field_name: str) -> bool:
     if isinstance(value, bool):
         return value
@@ -341,6 +347,12 @@ def validate_path(path_value: Any, *, field_name: str = "path", must_exist: bool
     path_str = validate_non_empty_string(path_value, field_name)
     if any(c in path_str for c in ("\x00", "\n", "\r")):
         raise PathValidationError("Path contains invalid control characters.", details={"field": field_name})
+    raw_parts = Path(path_str).parts
+    if ".." in raw_parts:
+        raise PathValidationError(
+            "Path traversal segmentes are not allowed.",
+            details={"field": field_name, "path": path_str}
+        )
     normalized = _normalize_path(path_str)
     if must_exist and not Path(normalized).exists():
         raise PathValidationError("Path does not exist.", details={"field": field_name, "path": normalized})
@@ -364,10 +376,19 @@ def validate_safe_home_path(path_value: Any) -> str:
 
 def validate_backup_destination(path_value: Any, *, must_exist: bool = False) -> str:
     normalized = validate_absolute_path(path_value, field_name="backup_path", must_exist=must_exist)
-    if _is_protected_path(normalized):
+    is_under_allowed_root = _is_under_allowed_roots(normalized, ALLOWED_BACKUP_ROOTS)
+    if _is_protected_path(normalized) and not is_under_allowed_root:
         raise BackupCreationError(
             "Backup destination cannot be inside a protected system root.", 
             details={"backup_path": normalized})
+    if not is_under_allowed_root:
+        raise BackupCreationError(
+            "Backup destination must be under an approved backup root.",
+            details={
+                "backup_path": normalized,
+                "allowed_roots": sorted(ALLOWED_BACKUP_ROOTS)
+            }
+        )
     return normalized
 
 def validate_recursive_target(path_value: Any) -> str:
@@ -836,6 +857,13 @@ def _parse_date(value: Any, *, field_name: str) -> date:
     except ValueError as exc:
         raise AccountExpirationError(f"{field_name} must use YYYY-MM-DD format.", details={"field": field_name, "value": text}, cause=exc) from exc
 
+def _is_under_allowed_roots(path_value: str, allowed_roots: set[str]) -> bool:
+    path_obj = Path(path_value)
+    for root in allowed_roots:
+        root_obj = Path(root)
+        if path_obj == root_obj or root_obj in path_obj.parents:
+            return True
+    return False
 
 __all__ = [
     "ALLOWED_EXPORT_FORMATS",
