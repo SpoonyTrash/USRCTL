@@ -298,7 +298,7 @@ def validate_user_delete_operation(
 
     if account_only and remove_home:
         raise ValidationError(
-            "Account_only and remove_home cannot both be true,",
+            "account_only and remove_home cannot both be true.",
             details={"username": user}
         )
     if remove_home and not backup_before_delete:
@@ -500,7 +500,7 @@ def validate_login_restriction(value: Any) -> str:
 def validate_password_max_days(value: Any) -> int:
     parsed = validate_int(value, "password_max_days")
     if parsed < PASSWORD_MAX_DAYS_MIN or parsed > PASSWORD_MAX_DAYS_MAX:
-        raise AdvancedSecurityPolicyError(f"password_max_day must be between {PASSWORD_MAX_DAYS_MIN} and {PASSWORD_MAX_DAYS_MAX}", details={"password_max_days": parsed})
+        raise AdvancedSecurityPolicyError(f"password_max_days must be between {PASSWORD_MAX_DAYS_MIN} and {PASSWORD_MAX_DAYS_MAX}", details={"password_max_days": parsed})
     return parsed
 
 def validate_policy_combination(
@@ -562,7 +562,7 @@ def validate_open_files_limit(value: Any) -> int:
 
 def validate_limits_rule(rule: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(rule, Mapping):
-        raise InvalidLimitError("limits rule must be a mapping")
+        raise InvalidLimitError("limits rule must be a mapping.")
     required = {"domain", "type", "item", "value"}
     missing = required.difference(rule.keys())
     if missing:
@@ -594,7 +594,7 @@ def validate_backup_version(value: Any) -> str:
     return version
 
 
-def  validate_backup_restore_coherence(*, backup_name: Any, version: Any, destination: Any) -> dict[str, Any]:
+def validate_backup_restore_coherence(*, backup_name: Any, version: Any, destination: Any) -> dict[str, Any]:
     return {
         "backup_name": validate_backup_name(backup_name),
         "version": validate_backup_version(version),
@@ -648,7 +648,22 @@ def validate_export_format(value: Any) -> str:
     return validate_in_set(fmt, "format", ALLOWED_EXPORT_FORMATS)
 
 def validate_export_path(path_value: Any) -> str:
-    return validate_absolute_path(path_value, field_name="export_path", must_exist=False)
+    normalized = validate_absolute_path(path_value, field_name="export_path", must_exist=False)
+    parent = Path(normalized).parent
+
+    if not parent.exists():
+        raise PathValidationError(
+            "Export path parent directory does not exist.",
+            details={"export_path": normalized, "parent": str(parent)}
+        )
+    
+    if _is_protected_path(str(parent)):
+        raise PathValidationError(
+            "Export path parent directory cannot be a protected system path.",
+            details={"export_path": normalized, "parent": str(parent)}
+        )
+    return normalized
+
 
 def validate_report_filename(value: Any) -> str:
     name = validate_non_empty_string(value, "filename")
@@ -728,7 +743,7 @@ def validate_dry_run_security_flags(*, dry_run: Any, require_confirmation: Any) 
 def validate_mutually_exclusive_params(params: Mapping[str, Any], *, fields: Sequence[str]) -> None:
     present = [f for f in fields if params.get(f) not in (None, False, "", [])]
     if len(present) > 1:
-        raise ValidationError("Mutually exclusive parameters were provided", details={"fields": present})
+        raise ValidationError("Mutually exclusive parameters were provided.", details={"fields": present})
 
 def validate_no_duplicates(values: Sequence[Any], *, field_name: str) -> list[Any]:
     normalized = validate_non_empty_list(values, field_name)
