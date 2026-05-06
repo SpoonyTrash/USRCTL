@@ -152,7 +152,7 @@ def validate_length(value: str, field_name: str, *, min_len: int, max_len: int) 
 
 def validate_non_empty_list(values: Any, field_name: str) -> list[Any]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
-        raise ValidationError(f"{field_name} must be a list.", details={"field": field_name})
+        raise ValidationError(f"{field_name} must be a non-text sequence.", details={"field": field_name})
     normalized = [v for v in values]
     if not normalized:
         raise ValidationError(f"{field_name} cannot be empty.", details={"field": field_name})
@@ -350,7 +350,7 @@ def validate_path(path_value: Any, *, field_name: str = "path", must_exist: bool
     raw_parts = Path(path_str).parts
     if ".." in raw_parts:
         raise PathValidationError(
-            "Path traversal segmentes are not allowed.",
+            "Path traversal segments are not allowed.",
             details={"field": field_name, "path": path_str}
         )
     normalized = _normalize_path(path_str)
@@ -628,7 +628,7 @@ def validate_restore_critical_overwrite(*, target_path: Any, overwrite: bool) ->
     overwrite_flag = validate_bool_flag(overwrite, "overwrite")
     if _is_protected_path(target) and  overwrite_flag:
         raise DangerousImpactError(
-            "Overwriting a protected system path is blocked", 
+            "Overwriting a protected system path is blocked.", 
             details={"target_path": target, "overwrite": overwrite_flag})
     return {"target_path": target, "overwrite": overwrite_flag}
 
@@ -664,13 +664,13 @@ def validate_export_coherence(*, export_format: Any, export_path: Any, filename:
     if not extension:
         raise ValidationError(
             "Report filename extension is required.",
-            details={"filename": filename_value, "format": fmt}
+            details={"filename": filename_value, "format": fmt, "extension": extension}
         )
     
     if extension != fmt:
         raise ValidationError(
             "Report filename extension does not match selected format.", 
-            details={"filename": filename_value,  "format": fmt})
+            details={"filename": filename_value,  "format": fmt, "extension": extension})
     return {"format": fmt, "export_path": path, "filename": filename_value}
 
 
@@ -881,6 +881,7 @@ __all__ = [
     "MIN_PASSWORD_LENGTH",
     "MAX_PASSWORD_LENGTH",
     "PROTECTED_SYSTEM_PATHS",
+    "ALLOWED_BACKUP_ROOTS",
     "validate_bool_flag",
     "validate_in_set",
     "validate_int",
@@ -938,6 +939,7 @@ __all__ = [
     "validate_export_coherence",
     "validate_export_format",
     "validate_export_path",
+    "validate_report_filename"
     "validate_report_filters",
     "validate_template_base_files",
     "validate_template_groups",
