@@ -363,8 +363,10 @@ def validate_safe_home_path(path_value: Any) -> str:
 
 def validate_backup_destination(path_value: Any, *, must_exist: bool = False) -> str:
     normalized = validate_absolute_path(path_value, field_name="backup_path", must_exist=must_exist)
-    if normalized in RESERVED_BACKUP_TARGETS:
-        raise BackupCreationError("Backup destination cannot be a critical system root.", details={"backup_path": normalized})
+    if _is_protected_path(normalized):
+        raise BackupCreationError(
+            "Backup destination cannot be inside a protected system root.", 
+            details={"backup_path": normalized})
     return normalized
 
 def validate_recursive_target(path_value: Any) -> str:
@@ -602,8 +604,10 @@ def  validate_backup_restore_coherence(*, backup_name: Any, version: Any, destin
 def validate_restore_critical_overwrite(*, target_path: Any, overwrite: bool) -> dict[str, Any]:
     target = validate_absolute_path(target_path, field_name="target_path")
     overwrite_flag = validate_bool_flag(overwrite, "overwrite")
-    if _is_protected_path(target) and not overwrite_flag:
-        raise DangerousImpactError("Critical restore blocked without overwrite confirmation.", details={"target": target})
+    if _is_protected_path(target) and  overwrite_flag:
+        raise DangerousImpactError(
+            "Overwriting a protected system path is blocked", 
+            details={"target_path": target, "overwrite": overwrite_flag})
     return {"target_path": target, "overwrite": overwrite_flag}
 
 def validate_restore_params(
@@ -619,8 +623,14 @@ def validate_restore_params(
         "target_path": validate_absolute_path(target_path, field_name="target_path"),
         "overwrite": validate_bool_flag(overwrite, "overwrite")
     }
-    if _is_protected_path(data["target_path"]) and not data["overwrite"]:
-        raise DangerousImpactError("Protected target restore requires explicit overwrite flag.", details={"target_path": data["target_path"]})
+    if _is_protected_path(data["target_path"]):
+        raise DangerousImpactError(
+            "Restoring directly into a protected system path is blocked.", 
+            details={
+                "target_path": data["target_path"],
+                "overwrite": data["overwrite"]
+                
+                })
     return data
 
 def validate_export_coherence(*, export_format: Any, export_path: Any, filename: Any) -> dict[str, str]:
