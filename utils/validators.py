@@ -639,8 +639,17 @@ def validate_export_coherence(*, export_format: Any, export_path: Any, filename:
     path = validate_export_path(export_path)
     filename_value = validate_report_filename(filename)
     extension = Path(filename_value).suffix.lower().lstrip(".")
-    if extension and extension != fmt:
-        raise ValidationError("Report filename extension does not match selected format.", details={"filename": filename_value,  "format": fmt})
+    
+    if not extension:
+        raise ValidationError(
+            "Report filename extension is required.",
+            details={"filename": filename_value, "format": fmt}
+        )
+    
+    if extension != fmt:
+        raise ValidationError(
+            "Report filename extension does not match selected format.", 
+            details={"filename": filename_value,  "format": fmt})
     return {"format": fmt, "export_path": path, "filename": filename_value}
 
 
@@ -755,10 +764,12 @@ def validate_paths_list(paths: Sequence[Any], *, must_exist: bool = False) -> li
     normalized = [validate_absolute_path(p, field_name="path", must_exist=must_exist) for p in validate_non_empty_list(paths, "paths")]
     return _dedupe_preserve_order(normalized)
 
-def validate_required_together(params: Mapping[str, Any], *, fields: Sequence):
+def validate_required_together(params: Mapping[str, Any], *, fields: Sequence[str]) -> None:
     present = [f for f in fields if params.get(f) not in (None, False, "", [])]
     if present and len(present) != len(fields):
-        raise ValidationError("These parameters must be provided together.", details={"fields": list(fields)})
+        raise ValidationError(
+            "These parameters must be provided together.", 
+            details={"fields": list(fields), "present": present})
 
 
 
