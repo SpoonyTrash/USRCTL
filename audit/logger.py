@@ -12,7 +12,8 @@ from system.result import SystemResult
 
 AUDIT_LOGGER_NAME = "usrctl.audit"
 DEFAULT_AUDIT_LOG_PATH = Path("/var/log/usrctl/audit.log")
-FALLBACK_AUDIT_LOG_PATH = Path("./usrctl_audit.log")
+FALLBACK_AUDIT_LOG_PATH = Path.home() / ".local" / "state" / "usrctl" / "audit.log"
+SECURITY_LEVEL_NUM = 25
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 AUDIT_FIELDS = (
     "timestamp",
@@ -52,6 +53,12 @@ SENSITIVE_KEYS = {
 }
 
 LEVEL_SECURITY = "SECURITY"
+
+def _register_security_level() -> None:
+    if logging.getLevelName(SECURITY_LEVEL_NUM) != LEVEL_SECURITY:
+        logging.addLevelName(SECURITY_LEVEL_NUM, LEVEL_SECURITY)
+    if not hasattr(logging, LEVEL_SECURITY):
+        setattr(logging, LEVEL_SECURITY, SECURITY_LEVEL_NUM)
 
 EVENT_OPERATION_STARTED = "operation_started"
 EVENT_OPERATION_COMPLETED = "operation_completed"
@@ -105,6 +112,7 @@ class AuditLogger:
         self._logger = logging.getLogger(AUDIT_LOGGER_NAME)
         self._logger.setLevel(logging.DEBUG)
         self._logger.propagate = False
+        _register_security_level()
         self._setup_handlers()
 
     def log_operation_started(self, action: str, actor: str, target: str, *, params: Mapping[str, Any] | None = None, dry_run: bool = False) -> None:
@@ -192,7 +200,7 @@ class AuditLogger:
                 sys_handler.setFormatter(formatter)
                 self._logger.addHandler(sys_handler)
             except OSError:
-                self._logger.warning({"message": "syslog_unavilable", "logger": AUDIT_LOGGER_NAME})
+                self._logger.warning({"message": "syslog_unavailable", "logger": AUDIT_LOGGER_NAME})
   
     def _ensure_log_path(self, path: Path) -> Path:
         def _harden_permissions(file_path: Path) -> None:
@@ -235,16 +243,16 @@ class AuditLogger:
         )
     
     def _build_event(self, *, level: str, event_type: str, action: str, actor: str, target: str, result: str, message: str, details: Mapping[str, Any] | None = None, impact: str = "none", dry_run: bool = False, error_code: str | None = None) -> AuditEvent:
-        normlized_action = self._normalize_action(action)
+        normalized_action = self._normalize_action(action)
         normalized_impact = impact
-        if normlized_action in SENSITIVE_EVENTS and impact == "none":
+        if normalized_action in SENSITIVE_EVENTS and impact == "none":
             normalized_impact = "high"
         
         return AuditEvent(
             timestamp=self._normalize_timestamp(),
             level=level,
             event_type=event_type,
-            action=normlized_action,
+            action=normalized_action,
             actor=actor,
             target=self._normalize_target(target),
             result=self._normalize_result(result),
@@ -273,7 +281,9 @@ class AuditLogger:
     
     def _dispatch(self, event: AuditEvent) -> None:
         payload = {field: getattr(event, field) for field in AUDIT_FIELDS}
-        log_level = getattr(logging, event.level, 25 if event.level == LEVEL_SECURITY else logging.INFO)
+        log_level = logging.getLevelName(event.level)
+        if isinstance(log_level, str):
+            log_level = SECURITY_LEVEL_NUM if event.level == LEVEL_SECURITY else logging.INFO
         self._logger.log(log_level, payload)
   
     def _normalize_timestamp(self, value: datetime | None = None) -> str:
