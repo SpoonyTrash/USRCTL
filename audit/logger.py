@@ -195,18 +195,23 @@ class AuditLogger:
                 self._logger.warning({"message": "syslog_unavilable", "logger": AUDIT_LOGGER_NAME})
   
     def _ensure_log_path(self, path: Path) -> Path:
+        def _harden_permissions(file_path: Path) -> None:
+            os.chmod(file_path, 0o600)
+
         try:
             if self.config.create_dirs:
                 path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                return path
-            path.touch(exist_ok=True)
-            os.chmod(path, 0o600)
+            if not path.exists():
+                path.touch(exist_ok=True)
+            _harden_permissions(path)
             return path
         except OSError:
             fallback = FALLBACK_AUDIT_LOG_PATH
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            fallback.touch(exist_ok=True)
+            if self.config.create_dirs:
+                fallback.parent.mkdir(parents=True, exist_ok=True)
+            if not fallback.exists():
+                fallback.touch(exist_ok=True)
+            _harden_permissions(fallback)
             return fallback
     
     def _event_from_result(self, actor: str, result: SystemResult, *, include_output: bool = False) -> AuditEvent:
@@ -230,19 +235,24 @@ class AuditLogger:
         )
     
     def _build_event(self, *, level: str, event_type: str, action: str, actor: str, target: str, result: str, message: str, details: Mapping[str, Any] | None = None, impact: str = "none", dry_run: bool = False, error_code: str | None = None) -> AuditEvent:
-            return AuditEvent(
-                timestamp=self._normalize_timestamp(),
-                level=level,
-                event_type=event_type,
-                action=self._normalize_action(action),
-                actor=actor,
-                target=self._normalize_target(target),
-                result=self._normalize_result(result),
-                message=message,
-                details=self._normalize_details(details),
-                impact=impact,
-                dry_run=dry_run,
-                error_code=error_code,
+        normlized_action = self._normalize_action(action)
+        normalized_impact = impact
+        if normlized_action in SENSITIVE_EVENTS and impact == "none":
+            normalized_impact = "high"
+        
+        return AuditEvent(
+            timestamp=self._normalize_timestamp(),
+            level=level,
+            event_type=event_type,
+            action=normlized_action,
+            actor=actor,
+            target=self._normalize_target(target),
+            result=self._normalize_result(result),
+            message=message,
+            details=self._normalize_details(details),
+            impact=normalized_impact,
+            dry_run=dry_run,
+            error_code=error_code,
                 )
     
     def _emit(self, level: str, event_type: str, action: str, actor: str, target: str, result: str, message: str, *, details: Mapping[str, Any] | None = None, impact: str = "none", dry_run: bool = False, error_code: str | None = None) -> None:
@@ -281,14 +291,22 @@ class AuditLogger:
         return mapping.get(value, value)
     
     def _normalize_details(self, details: Mapping[str, Any] | None) -> dict[str, Any]:
-        return self._sanitize_data(dict(details or {}))
+        if not self.config.include_technical_details:
+            return {}
+        
+        payload = dict(details or {})
+        if not self.config.debug_tracebacks:
+            payload.pop("traceback", None)
+            payload.pop("exception", None)
+        
+        return self._sanitize_data(payload)
 
     def _sanitize_data(self, value: Any) -> Any:
         if isinstance(value, Mapping):
             clean: dict[str, Any] = {}
             for key, val in value.items():
                 key_lower = str(key).lower()
-                if any(token in key_lower for token in SENSITIVE_KEYS):
+                if self.config.strict_redaction and any(token in key_lower for token in SENSITIVE_KEYS):
                     clean[str(key)] = "[REDACTED]"
                 else:
                     clean[str(key)] = self._sanitize_data(val)
@@ -298,11 +316,11 @@ class AuditLogger:
             return [self._sanitize_data(v) for v in value]
         if isinstance(value, tuple):
             return tuple(self._sanitize_data(v) for v in value)
-        if isinstance(value, str) and "shadow" in value.lower():
+        if self.config.strict_redaction and isinstance(value, str) and "shadow" in value.lower():
             return "[REDACTED]"
         return value
     
-DEFAULT_AUDIT_LOGGER = AuditLogger | None = None
+DEFAULT_AUDIT_LOGGER: AuditLogger | None = None
 
 def get_default_audit_logger() -> AuditLogger:
     global DEFAULT_AUDIT_LOGGER
