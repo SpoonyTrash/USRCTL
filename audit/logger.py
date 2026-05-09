@@ -302,7 +302,13 @@ class AuditLogger:
             return "[REDACTED]"
         return value
     
-DEFAULT_AUDIT_LOGGER = AuditLogger()
+DEFAULT_AUDIT_LOGGER = AuditLogger | None = None
+
+def get_default_audit_logger() -> AuditLogger:
+    global DEFAULT_AUDIT_LOGGER
+    if DEFAULT_AUDIT_LOGGER is None:
+        DEFAULT_AUDIT_LOGGER = AuditLogger()
+    return DEFAULT_AUDIT_LOGGER
 
 __all__ = [
   "AUDIT_LOGGER_NAME",
@@ -311,5 +317,6 @@ __all__ = [
   "SENSITIVE_KEYS",
   "AuditConfig",
   "AuditLogger",
-  "DEFAULT_AUDIT_LOGGER"
+  "DEFAULT_AUDIT_LOGGER",
+  "get_default_audit_logger"
 ]
