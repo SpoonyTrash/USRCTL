@@ -2,6 +2,7 @@ import logging
 import logging.handlers
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -53,6 +54,12 @@ SENSITIVE_KEYS = {
 }
 
 LEVEL_SECURITY = "SECURITY"
+
+VALUE_REDACTION_PATTERNS = (
+    re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*[^\s,;]+"),
+    re.compile(r"(?i)authorization\s*:\s*bearer\s+[^\s,;]+"),
+)
+
 
 def _register_security_level() -> None:
     if logging.getLevelName(SECURITY_LEVEL_NUM) != LEVEL_SECURITY:
@@ -181,11 +188,12 @@ class AuditLogger:
         level = "INFO" if result in {"success", "partial"} else "CRITICAL"
         self._emit(level, EVENT_EXPORT_COMPLETED, "export_report", actor, f"report:{report_type}", result, message, details=details, impact="medium")
 
-    def _setup_handlers(self) -> None:
-        if self._logger.handlers:
-            return
-        
+    def _setup_handlers(self) -> None:        
         formatter = JsonLineFormatter()
+
+        for handler in list(self._logger.handlers):
+            handler.close()
+            self._logger.removeHandler(handler)
 
         file_path = self._ensure_log_path(self.config.file_path)
         file_handler = logging.FileHandler(file_path, mode=self.config.file_mode, encoding="utf-8")
@@ -326,9 +334,13 @@ class AuditLogger:
             return [self._sanitize_data(v) for v in value]
         if isinstance(value, tuple):
             return tuple(self._sanitize_data(v) for v in value)
-        if self.config.strict_redaction and isinstance(value, str) and "shadow" in value.lower():
-            return "[REDACTED]"
+        if self.config.strict_redaction and isinstance(value, str):
+            if "shadow" in value.lower() or self._contains_sensitive_value(value):
+                return "[REDACTED]"
         return value
+    
+    def _contains_sensitive_value(self, value: str) -> bool:
+        return any(pattern.search(value) for pattern in VALUE_REDACTION_PATTERNS)
     
 DEFAULT_AUDIT_LOGGER: AuditLogger | None = None
 
