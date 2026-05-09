@@ -51,7 +51,7 @@ SENSITIVE_KEYS = {
     "private_key"
 }
 
-LEVEL_SECURTY = "SECURITY"
+LEVEL_SECURITY = "SECURITY"
 
 EVENT_OPERATION_STARTED = "operation_started"
 EVENT_OPERATION_COMPLETED = "operation_completed"
@@ -128,10 +128,10 @@ class AuditLogger:
         self._emit("WARNING", EVENT_CHANGE_APPLIED, action, actor, target, "partial", message, details=dict(details or {}))
     
     def log_security_event(self, action: str, actor: str, target: str, *, message: str, details: Mapping[str, Any] | None = None, result: str = "success") -> None:
-        self._emit(LEVEL_SECURTY, EVENT_CHANGE_APPLIED, action, actor, target, result, message, details=dict(details or {}), impact="high")
+        self._emit(LEVEL_SECURITY, EVENT_CHANGE_APPLIED, action, actor, target, result, message, details=dict(details or {}), impact="high")
 
     def log_password_changed(self, actor: str, username: str, *, forced_next_login: bool = False) -> None:
-        self.log_security_event("change_passwprd", actor, f"user:{username}", message="Password changed.", details={"forced_next_login": forced_next_login})
+        self.log_security_event("change_password", actor, f"user:{username}", message="Password changed.", details={"forced_next_login": forced_next_login})
 
     def log_account_lock_state(self, actor: str, username: str, *, locked: bool, reason: str | None = None) -> None:
         action = "lock_user" if locked else "unlock_user"
@@ -169,7 +169,7 @@ class AuditLogger:
         self._emit(level, EVENT_RESTORE_EXECUTED, "restore_backup", actor, f"backup:{backup_id}", result, message, details=dict(details or {}), impact="critical" )
 
     def log_report_export(self, actor: str, report_type: str, fmt: str, *, output_path: str, records: int | None = None, filters: Mapping[str, Any] | None = None, result: str = "success", message: str = "Report exported.") -> None:
-        details: dict[str, Any] = {"format": fmt, "outpat_path": output_path, "records": records, "filters": dict(filters or {})}
+        details: dict[str, Any] = {"format": fmt, "output_path": output_path, "records": records, "filters": dict(filters or {})}
         level = "INFO" if result in {"success", "partial"} else "CRITICAL"
         self._emit(level, EVENT_EXPORT_COMPLETED, "export_report", actor, f"report:{report_type}", result, message, details=details, impact="medium")
 
@@ -263,7 +263,7 @@ class AuditLogger:
     
     def _dispatch(self, event: AuditEvent) -> None:
         payload = {field: getattr(event, field) for field in AUDIT_FIELDS}
-        log_level = getattr(logging, event.level, 25 if event.level == LEVEL_SECURTY else logging.INFO)
+        log_level = getattr(logging, event.level, 25 if event.level == LEVEL_SECURITY else logging.INFO)
         self._logger.log(log_level, payload)
   
     def _normalize_timestamp(self, value: datetime | None = None) -> str:
