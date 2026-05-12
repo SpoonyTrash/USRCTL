@@ -55,9 +55,12 @@ SENSITIVE_KEYS = {
 
 LEVEL_SECURITY = "SECURITY"
 
+ALLOWED_RESULTS = {"success", "failed", "partial", "simulated", "cancelled"}
+ALLOWED_IMPACTS = {"none", "low", "medium", "high", "critical"}
+
 VALUE_REDACTION_PATTERNS = (
-    re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization)\s*[:=]\s*[^\s,;]+"),
-    re.compile(r"(?i)authorization\s*:\s*bearer\s+[^\s,;]+"),
+    re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token)\s*([:=])\s*([^\s,;]+)"),
+    re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([^\s,;]+)"),
 )
 
 
@@ -273,8 +276,8 @@ class AuditLogger:
     
     def _build_event(self, *, level: str, event_type: str, action: str, actor: str, target: str, result: str, message: str, details: Mapping[str, Any] | None = None, impact: str = "none", dry_run: bool = False, error_code: str | None = None) -> AuditEvent:
         normalized_action = self._normalize_action(action)
-        normalized_impact = impact
-        if normalized_action in SENSITIVE_EVENTS and impact == "none":
+        normalized_impact = self._normalize_impact(impact)
+        if normalized_action in SENSITIVE_EVENTS and normalized_impact == "none":
             normalized_impact = "high"
         
         return AuditEvent(
@@ -327,7 +330,14 @@ class AuditLogger:
     def _normalize_result(self, result: str) -> str:
         mapping = {"ok": "success", "failure": "failed", "canceled": "cancelled", "dry_run": "simulated"}
         value = result.strip().lower()
-        return mapping.get(value, value)
+        normalized = mapping.get(value, value)
+        return normalized if normalized in ALLOWED_RESULTS else "failed"
+    
+    def _normalize_impact(self, impact: str) -> str:
+        value = impact.strip().lower()
+        if value not in ALLOWED_IMPACTS:
+            return "none"
+        return value
     
     def _normalize_details(self, details: Mapping[str, Any] | None) -> dict[str, Any]:
         if not self.config.include_technical_details:
@@ -356,13 +366,25 @@ class AuditLogger:
         if isinstance(value, tuple):
             return tuple(self._sanitize_data(v) for v in value)
         if self.config.strict_redaction and isinstance(value, str):
-            if "shadow" in value.lower() or self._contains_sensitive_value(value):
+            if "shadow" in value.lower():
                 return "[REDACTED]"
+        
+            if self._contains_sensitive_value(value):
+                return self._redact_sensitive_fragments(value)
         return value
     
     def _contains_sensitive_value(self, value: str) -> bool:
         return any(pattern.search(value) for pattern in VALUE_REDACTION_PATTERNS)
     
+    def _redact_sensitive_fragments(self, value: str) -> str:
+        sanitized = VALUE_REDACTION_PATTERNS[0].sub(self._replace_key_value_match, value)
+        sanitized = VALUE_REDACTION_PATTERNS[1].sub("Authorization: Bearer [REDACTED]", sanitized)
+        return sanitized
+    
+    def _replace_key_value_match(self, match: re.Match[str]) -> str:
+        key = match.group(1)
+        separator = match.group(2)
+        return f"{key}{separator}[REDACTED]"
 DEFAULT_AUDIT_LOGGER: AuditLogger | None = None
 
 def get_default_audit_logger() -> AuditLogger:
@@ -381,5 +403,3 @@ __all__ = [
   "DEFAULT_AUDIT_LOGGER",
   "get_default_audit_logger"
 ]
-
-#CORREGIR 6  Y 7
