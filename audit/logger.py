@@ -107,6 +107,27 @@ class AuditEvent:
     dry_run: bool = False
     error_code: str | None = None
 
+    def __post_init__(self) -> None:
+        self.level = self._require_normalized_text("level", self.level, lowercase=False)
+        self.event_type = self._require_normalized_text("event_type", self.event_type)
+        self.result = self._require_normalized_text("result", self.result)
+        self.action = self._normalize_token(self._require_normalized_text("action", self.action))
+        self.actor = self._require_normalized_text("actor", self.actor)
+        self.target = self._require_normalized_text("target", self.target)
+    
+    @staticmethod
+    def _require_normalized_text(field_name: str, value: str, *, lowercase: bool = True) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{field_name} must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{field_name} is required")
+        return normalized.lower() if lowercase else normalized
+    
+    @staticmethod
+    def _normalize_token(value: str) -> str:
+        return value.replace("-", "_").replace(" ", "_")
+
 class JsonLineFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         if isinstance(record.msg, dict):
@@ -185,7 +206,7 @@ class AuditLogger:
 
     def log_report_export(self, actor: str, report_type: str, fmt: str, *, output_path: str, records: int | None = None, filters: Mapping[str, Any] | None = None, result: str = "success", message: str = "Report exported.") -> None:
         details: dict[str, Any] = {"format": fmt, "output_path": output_path, "records": records, "filters": dict(filters or {})}
-        level = "INFO" if result in {"success", "partial"} else "CRITICAL"
+        level = "INFO" if result in {"success", "partial"} else "ERROR"
         self._emit(level, EVENT_EXPORT_COMPLETED, "export_report", actor, f"report:{report_type}", result, message, details=details, impact="medium")
 
     def _setup_handlers(self) -> None:        
@@ -360,3 +381,5 @@ __all__ = [
   "DEFAULT_AUDIT_LOGGER",
   "get_default_audit_logger"
 ]
+
+#CORREGIR 6  Y 7
