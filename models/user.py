@@ -6,8 +6,8 @@ from typing import Any, Mapping
 from utils.errors import InvalidUsernameError, InvalidUidError, InvalidShellError
 
 ADMIN_GROUP_NAMES = frozenset({"sudo", "wheel", "adm"})
-DEFAULT_USER_SHELL = "/bin/shell"
-NON_INTERACTIVE_SHELL = frozenset({"/usr/bin/nologin", "/sbin/nologin", "bin/false"})
+DEFAULT_USER_SHELL = "/bin/sh"
+NON_INTERACTIVE_SHELL = frozenset({"/usr/bin/nologin", "/sbin/nologin", "/bin/false"})
 NORMAL_USER_MIN_UID = 1000
 
 class AccountStatus(str, Enum):
@@ -53,12 +53,12 @@ class SystemUser:
     shell: str = DEFAULT_USER_SHELL
     groups: list[str] = field(default_factory=list)
     status: AccountStatus = AccountStatus.UNKNOWN
-    user_type = UserType = UserType.REGULAR
+    user_type: UserType = UserType.REGULAR
     privilege_level: PrivilegeLevel = PrivilegeLevel.NONE
     is_sudo: bool = False
     origin: ModelOrigin = ModelOrigin.SYSTEM
 
-    expire_at: date | None = None
+    expires_at: date | None = None
     password_last_changed_at: date | None = None
     password_max_days: int | None = None
     password_warn_days: int | None = None
@@ -111,7 +111,7 @@ class SystemUser:
     def is_expired(self) -> bool:
         if self.status == AccountStatus.EXPIRED or self.password_status == PasswordStatus.EXPIRED:
             return True
-        return self.expire_at is not None and self.expire_at < date.today()
+        return self.expires_at is not None and self.expires_at < date.today()
 
 
     def _normalize_and_validate(self) -> None:
@@ -134,7 +134,7 @@ class SystemUser:
         self.groups = sorted({str(group).strip() for group in self.groups if str(group).strip()})
     
     @staticmethod
-    def _validate_non_negative_int(value: int | None, field_name: int) -> int | None:
+    def _validate_non_negative_int(value: int | None, field_name: str) -> int | None:
         if value is None:
             return None
         if not isinstance(value, int) or value < 0:
@@ -166,7 +166,7 @@ class SystemUser:
             "status": self.status.value,
             "is_sudo": self.is_sudo,
             "account_locked": self.is_locked,
-            "expires_at": _date_to_iso(self.expire_at),
+            "expires_at": _date_to_iso(self.expires_at),
             "groups": list(self.groups),
             "origin": self.origin,
         }
@@ -184,7 +184,7 @@ class SystemUser:
             "is_system_user": self.is_system_user,
             "has_interactive_shell": self.has_interactive_shell,
             "has_admin_privileges": self.has_admin_privileges,
-            "expires_at": _date_to_iso(self.expire_at),
+            "expires_at": _date_to_iso(self.expires_at),
             "password_last_changed_at": _date_to_iso(self.password_last_changed_at),
             "origin": self.origin,
         }
@@ -209,7 +209,7 @@ class SystemUser:
             password_last_changed_at=self.password_last_changed_at,
             password_max_days=self.password_max_days,
             password_warn_days=self.password_warn_days,
-            expires_at=self.expire_at,
+            expires_at=self.expires_at,
             inactivity_days=self.inactivity_days,
             account_locked=self.account_locked
         )
@@ -244,7 +244,7 @@ class SystemUser:
             password_max_days=_coerce_int(payload.get("password_max_days")),
             password_warn_days = _coerce_int(payload.get("password_warn_days")),
             inactivity_days = _coerce_int(payload.get("inactivity_days")),
-            requires_password_change=bool(payload.get("requieres_password_change", False)),
+            requires_password_change=bool(payload.get("requires_password_change", False)),
             account_locked=bool(payload.get("account_locked", False)),
             password_status=_coerce_enum(payload.get("password_status"), PasswordStatus, PasswordStatus.UNKNOWN),
             gecos=_coerce_optional_str(payload.get("gecos")),
@@ -403,7 +403,7 @@ class UserSecurityInfo:
     def to_dict(self) -> dict[str, Any]:
         return {
             "password_status": self.password_status.value,
-            "requires_pasword_change": self.requires_password_change,
+            "requires_password_change": self.requires_password_change,
             "password_last_changed_at": _date_to_iso(self.password_last_changed_at),
             "password_max_days": self.password_max_days,
             "password_warn_days": self.password_warn_days,
