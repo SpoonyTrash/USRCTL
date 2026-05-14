@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 from utils.errors import InvalidUsernameError, InvalidUidError, InvalidShellError
+from utils.validators import validate_username
 
 ADMIN_GROUP_NAMES = frozenset({"sudo", "wheel", "adm"})
 DEFAULT_USER_SHELL = "/bin/sh"
@@ -115,9 +116,7 @@ class SystemUser:
 
 
     def _normalize_and_validate(self) -> None:
-        self.username = (self.username or "").strip()
-        if not self.username:
-            raise InvalidUsernameError("username is required")
+        self.username = validate_username(self.username, allow_reserved=True)
         
         self.uid = self._validate_non_negative_int(self.uid, "uid")
         self.gid = self._validate_non_negative_int(self.gid, "gid")
@@ -153,7 +152,7 @@ class SystemUser:
             "user_type": self.user_type.value,
             "privilege_level": self.privilege_level.value,
             "is_sudo": self.is_sudo,
-            "origin": self.origin,
+            "origin": self.origin.value,
             "security": self.security_info.to_dict(),
             "gecos": self.gecos,
             "metadata": dict(self.metadata)
@@ -168,7 +167,7 @@ class SystemUser:
             "account_locked": self.is_locked,
             "expires_at": _date_to_iso(self.expires_at),
             "groups": list(self.groups),
-            "origin": self.origin,
+            "origin": self.origin.value,
         }
     
     def to_report_dict(self) -> dict[str, Any]:
@@ -186,7 +185,7 @@ class SystemUser:
             "has_admin_privileges": self.has_admin_privileges,
             "expires_at": _date_to_iso(self.expires_at),
             "password_last_changed_at": _date_to_iso(self.password_last_changed_at),
-            "origin": self.origin,
+            "origin": self.origin.value,
         }
     
     def to_summary(self) -> "UserSummary":
@@ -288,9 +287,7 @@ class UserCreateSpec:
     origin: ModelOrigin = ModelOrigin.CLI_INPUT
 
     def __post_init__(self) -> None:
-        self.username = (self.username or "").strip()
-        if not self.username:
-            raise InvalidUsernameError("username is required")
+        self.username = validate_username(self.username, allow_reserved=True)
         self.uid = SystemUser._validate_non_negative_int(self.uid, "uid")
         self.gid = SystemUser._validate_non_negative_int(self.gid, "gid")
         self.shell = (self.shell or "").strip()
