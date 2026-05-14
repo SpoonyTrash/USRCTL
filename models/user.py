@@ -3,7 +3,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Mapping
 
-from utils.errors import InvalidUsernameError, InvalidUidError, InvalidShellError
+from utils.errors import InvalidGidError, InvalidUidError, InvalidShellError
 from utils.validators import validate_username
 
 ADMIN_GROUP_NAMES = frozenset({"sudo", "wheel", "adm"})
@@ -117,9 +117,14 @@ class SystemUser:
 
     def _normalize_and_validate(self) -> None:
         self.username = validate_username(self.username, allow_reserved=True)
+        self.status = _coerce_enum(self.status, AccountStatus, AccountStatus.UNKNOWN)
+        self.user_type = _coerce_enum(self.user_type, UserType, UserType.REGULAR)
+        self.privilege_level = _coerce_enum(self.privilege_level, PrivilegeLevel, PrivilegeLevel.NONE)
+        self.origin = _coerce_enum(self.origin, ModelOrigin, ModelOrigin.SYSTEM)
+        self.password_status = _coerce_enum(self.password_status, PasswordStatus, PasswordStatus.UNKNOWN)
         
-        self.uid = self._validate_non_negative_int(self.uid, "uid")
-        self.gid = self._validate_non_negative_int(self.gid, "gid")
+        self.uid = self._validate_non_negative_int(self.uid, "uid", InvalidUidError)
+        self.gid = self._validate_non_negative_int(self.gid, "gid", InvalidGidError)
 
         if self.home is not None:
             self.home = str(self.home).strip()
@@ -133,11 +138,15 @@ class SystemUser:
         self.groups = sorted({str(group).strip() for group in self.groups if str(group).strip()})
     
     @staticmethod
-    def _validate_non_negative_int(value: int | None, field_name: str) -> int | None:
+    def _validate_non_negative_int(
+        value: int | None, 
+        field_name: str,
+        error_cls: type[Exception]
+    ) -> int | None:
         if value is None:
             return None
         if not isinstance(value, int) or value < 0:
-            raise InvalidUidError(f"{field_name} must be a non-negative integer")
+            raise error_cls(f"{field_name} must be a non-negative integer")
         return value
     
     def to_dict(self) -> dict[str, Any]:
