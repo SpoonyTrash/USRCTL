@@ -151,7 +151,7 @@ class SystemUser:
         if value is None:
             return None
         if isinstance(value, bool):
-            raise error_cls(f"{field_name}")
+            raise error_cls(f"{field_name} must be an integer, not boolean.")
         if not isinstance(value, int) or value < 0:
             raise error_cls(f"{field_name} must be a non-negative integer")
         return value
@@ -416,11 +416,11 @@ class UserUpdateSpec:
         if self.groups is not None:
             self.groups = _coerce_groups(self.groups)
         self.lock_account = (
-            None if self.self.lock_account is None else _coerce_bool(self.lock_account, field_name="lock_account")
+            None if self.lock_account is None else _coerce_bool(self.lock_account, field_name="lock_account")
         )
         self.requires_password_change = (
             None
-            if self.self.requires_password_change is None
+            if self.requires_password_change is None
             else _coerce_bool(self.requires_password_change, field_name="requires_password_change")
         )
         
@@ -582,7 +582,7 @@ def _coerce_enum_strict(
         return enum_cls(value)
     except ValueError as exc:
         allowed = ", ".join(member.value for member in enum_cls)
-    raise error_cls(f"{field_name} must be one of: {allowed} (received {value!r})") from exc
+        raise error_cls(f"{field_name} must be one of: {allowed} (received {value!r})") from exc
 
 def _coerce_date(value: Any) -> date | None:
     if value is None or value == "":
@@ -612,7 +612,7 @@ def _coerce_bool(value: Any, *, field_name: str) -> bool:
         if normalized in falsy:
             return False
         raise ValidationError(
-            f"{field_name} must be one of: true/false, yes/no, 1/0 (recived {value!r})"
+            f"{field_name} must be one of: true/false, yes/no, 1/0 (received {value!r})"
         )
     if value is None:
         return False
