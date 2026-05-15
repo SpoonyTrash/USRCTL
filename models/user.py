@@ -226,8 +226,8 @@ class SystemUser:
     def from_passwd_entry(cls, entry: Mapping[str, Any]) -> "SystemUser":
         return cls(
             username=str(entry.get("username", "")).strip(),
-            uid=_coerce_int(entry.get("uid")),
-            gid=_coerce_int(entry.get("gid")),
+            uid=_coerce_int(entry.get("uid"), field_name="uid", error_cls=InvalidUidError),
+            gid=_coerce_int(entry.get("gid"), field_name="gid", error_cls=InvalidGidError),
             gecos=_coerce_optional_str(entry.get("gecos")),
             home=_coerce_optional_str(entry.get("home")),
             shell=_coerce_optional_str(entry.get("shell")) or DEFAULT_USER_SHELL,
@@ -238,8 +238,8 @@ class SystemUser:
     def from_system_data(cls, payload: Mapping[str, Any]) -> "SystemUser":
         return cls(
             username=str(payload.get("username", "")).strip(),
-            uid=_coerce_int(payload.get("uid")),
-            gid=_coerce_int(payload.get("gid")),
+            uid=_coerce_int(payload.get("uid"), field_name="uid", error_cls=InvalidUidError),
+            gid=_coerce_int(payload.get("gid"), field_name="gid", error_cls=InvalidGidError),
             home=_coerce_optional_str(payload.get("home")),
             shell=_coerce_optional_str(payload.get("shell")) or DEFAULT_USER_SHELL,
             groups=_coerce_groups(payload.get("groups")),
@@ -249,12 +249,13 @@ class SystemUser:
             is_sudo=_coerce_bool(payload.get("is_sudo", False), field_name="is_sudo"),
             expires_at=_coerce_date(payload.get("expires_at")),
             password_last_changed_at=_coerce_date(payload.get("password_last_changed_at")),
-            password_max_days=_coerce_int(payload.get("password_max_days")),
-            password_warn_days = _coerce_int(payload.get("password_warn_days")),
-            inactivity_days = _coerce_int(payload.get("inactivity_days")),
+            password_max_days=_coerce_int(payload.get("password_max_days"), field_name="password_max_days"),
+            password_warn_days = _coerce_int(payload.get("password_warn_days"), field_name="password_warn_days"),
+            inactivity_days = _coerce_int(payload.get("inactivity_days"), field_name="inactivity_days"),
             requires_password_change=_coerce_bool(
                 payload.get("requires_password_change", False),
-                field_name="requires_password_change"),
+                field_name="requires_password_change"
+            ),
             account_locked=_coerce_bool(payload.get("account_locked", False), field_name="account_locked"),
             password_status=_coerce_enum(payload.get("password_status"), PasswordStatus, PasswordStatus.UNKNOWN),
             gecos=_coerce_optional_str(payload.get("gecos")),
@@ -272,6 +273,9 @@ class UserStatus:
     account_locked: bool = False
     expires_at: date | None = None
     inactivity_days: int | None = None
+
+    def __post_init__(self) -> None:
+        self.status = _coerce_enum(self.status, AccountStatus, AccountStatus.UNKNOWN)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -298,7 +302,9 @@ class UserCreateSpec:
     origin: ModelOrigin = ModelOrigin.CLI_INPUT
 
     def __post_init__(self) -> None:
-        self.username = validate_username(self.username, allow_reserved=True)
+        self.origin = _coerce_enum(self.origin, ModelOrigin, ModelOrigin.CLI_INPUT)
+        allow_reserved = self.origin in (ModelOrigin.SYSTEM, ModelOrigin.BACKUP)
+        self.username = validate_username(self.username, allow_reserved=allow_reserved)
         self.uid = SystemUser._validate_non_negative_int(self.uid, "uid", InvalidUidError)
         self.gid = SystemUser._validate_non_negative_int(self.gid, "gid", InvalidGidError)
         self.shell = (self.shell or "").strip()
@@ -335,8 +341,8 @@ class UserCreateSpec:
     ) -> "UserCreateSpec":
         return cls(
             username=str(cli_data.get("username", "")).strip(),
-            uid=_coerce_int(cli_data.get("uid")),
-            gid=_coerce_int(cli_data.get("gid")),
+            uid=_coerce_int(cli_data.get("uid"), field_name="uid", error_cls=InvalidUidError),
+            gid=_coerce_int(cli_data.get("gid"), field_name="gid", error_cls=InvalidGidError),
             home=_coerce_optional_str(cli_data.get("home")),
             create_home=_coerce_bool(cli_data.get("create_home", True), field_name="create_home"),
             shell=_coerce_optional_str(cli_data.get("shell")) or DEFAULT_USER_SHELL,
@@ -445,6 +451,13 @@ class UserSecurityInfo:
     inactivity_days: int | None = None
     account_locked: bool = False
 
+    def __post_init__(self) -> None:
+        self.password_status = _coerce_enum(
+            self.password_status,
+            PasswordStatus,
+            PasswordStatus.UNKNOWN
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "password_status": self.password_status.value,
@@ -468,6 +481,9 @@ class UserSummary:
     primary_group: int | None
     groups: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        self.status = _coerce_enum(self.status, AccountStatus, AccountStatus.UNKNOWN)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "username": self.username,
@@ -486,7 +502,12 @@ def _coerce_optional_str(value: Any) -> str | None:
     text = str(value).strip()
     return text or None
 
-def _coerce_int(value: Any) -> int | None:
+def _coerce_int(
+        value: Any,
+        *,
+        field_name: str = "value",
+        error_cls: type[Exception] = ValidationError
+    ) -> int | None:
     if value in (None, ""):
         return None
     if isinstance(value, int):
@@ -494,7 +515,7 @@ def _coerce_int(value: Any) -> int | None:
     try:
         return int(str(value).strip())
     except (TypeError, ValueError) as exc:
-        raise InvalidUidError(f"invalid integer value: {value!r}") from exc
+        raise error_cls(f"{field_name} must be an integer value (received {value!r})") from exc
 
 def _coerce_groups(value: Any) -> list[str]:
     if value is None:
@@ -522,7 +543,10 @@ def _coerce_date(value: Any) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
-    return date.fromisoformat(str(value))
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"invalid date value: {value!r}. expected YYYY-MM-DD") from exc
 
 def _coerce_bool(value: Any, *, field_name: str) -> bool:
     if isinstance(value, bool):
