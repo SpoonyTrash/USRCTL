@@ -382,12 +382,40 @@ class UserUpdateSpec:
     requires_password_change: bool | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.username = validate_username(self.username, allow_reserved=True)
+
+        if self.new_home is not None:
+            if not isinstance(self.new_shell, str) or not self.new_shell.strip():
+                raise InvalidShellError("new_shell must be a non-empty string")
+            self.new_shell = self.new_shell.strip()
+        
+        self.groups = _coerce_groups(self.groups)
+        self.expires_at = _coerce_date(self.expires_at)
+
+        self.inactivity_days = SystemUser._validate_non_negative_int(
+            self.inactivity_days, "inactivity_days", ValidationError
+        )
+        self.password_max_days = SystemUser._validate_non_negative_int(
+            self.password_max_days, "password_max_days", ValidationError
+        )
+        self.password_warn_days = SystemUser._validate_non_negative_int(
+            self.password_warn_days, "password_warn_days", ValidationError
+        )
+
+        if (
+            self.password_max_days is not None
+            and self.password_warn_days is not None
+            and self.password_warn_days > self.password_max_days
+        ):
+
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "username": self.username,
             "new_home": self.new_home,
             "new_shell": self.new_shell,
-            "groups": list(self.groups or []),
+            "groups": list(self.groups),
             "lock_account": self.lock_account,
             "expires_at": _date_to_iso(self.expires_at),
             "inactivity_days": self.inactivity_days,
@@ -396,6 +424,7 @@ class UserUpdateSpec:
             "requires_password_change": self.requires_password_change,
             "metadata": dict(self.metadata),
         }
+    
 
     
     
