@@ -122,6 +122,11 @@ class SystemUser:
         self.privilege_level = _coerce_enum(self.privilege_level, PrivilegeLevel, PrivilegeLevel.NONE)
         self.origin = _coerce_enum(self.origin, ModelOrigin, ModelOrigin.SYSTEM)
         self.password_status = _coerce_enum(self.password_status, PasswordStatus, PasswordStatus.UNKNOWN)
+        self.is_sudo = _coerce_bool(self.is_sudo, field_name="is_sudo")
+        self.requires_password_change = _coerce_bool(
+            self.requires_password_change, field_name="requires_password_change"
+        )
+        self.account_locked = _coerce_bool(self.account_locked, field_name="account_locked")
         
         self.uid = self._validate_non_negative_int(self.uid, "uid", InvalidUidError)
         self.gid = self._validate_non_negative_int(self.gid, "gid", InvalidGidError)
@@ -276,6 +281,7 @@ class UserStatus:
 
     def __post_init__(self) -> None:
         self.status = _coerce_enum(self.status, AccountStatus, AccountStatus.UNKNOWN)
+        self.account_locked = _coerce_bool(self.account_locked, field_name="account_locked")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -305,6 +311,10 @@ class UserCreateSpec:
         self.origin = _coerce_enum(self.origin, ModelOrigin, ModelOrigin.CLI_INPUT)
         allow_reserved = self.origin in (ModelOrigin.SYSTEM, ModelOrigin.BACKUP)
         self.username = validate_username(self.username, allow_reserved=allow_reserved)
+        self.create_home = _coerce_bool(self.create_home, field_name="create_home")
+        self.force_password_change = _coerce_bool(
+            self.force_password_change, field_name="force_password_change"
+        )
         self.uid = SystemUser._validate_non_negative_int(self.uid, "uid", InvalidUidError)
         self.gid = SystemUser._validate_non_negative_int(self.gid, "gid", InvalidGidError)
         self.shell = (self.shell or "").strip()
@@ -401,7 +411,17 @@ class UserUpdateSpec:
                 raise InvalidShellError("new_shell must be a non-empty string.")
             self.new_shell = self.new_shell.strip()
         
-        self.groups = _coerce_groups(self.groups)
+        if self.groups is not None:
+            self.groups = _coerce_groups(self.groups)
+        self.lock_account = (
+            None if self.self.lock_account is None else _coerce_bool(self.lock_account, field_name="lock_account")
+        )
+        self.requires_password_change = (
+            None
+            if self.self.requires_password_change is None
+            else _coerce_bool(self.requires_password_change, field_name="requires_password_change")
+        )
+        
         self.expires_at = _coerce_date(self.expires_at)
 
         self.inactivity_days = SystemUser._validate_non_negative_int(
@@ -427,7 +447,7 @@ class UserUpdateSpec:
             "username": self.username,
             "new_home": self.new_home,
             "new_shell": self.new_shell,
-            "groups": list(self.groups),
+            "groups": list(self.groups) if self.groups is not None else None,
             "lock_account": self.lock_account,
             "expires_at": _date_to_iso(self.expires_at),
             "inactivity_days": self.inactivity_days,
@@ -457,6 +477,10 @@ class UserSecurityInfo:
             PasswordStatus,
             PasswordStatus.UNKNOWN
         )
+        self.requires_password_change = _coerce_bool(
+            self.requires_password_change, field_name="requires_password_change"
+        )
+        self.account_locked = _coerce_bool(self.account_locked, field_name="account_locked")
 
     def to_dict(self) -> dict[str, Any]:
         return {
