@@ -3,7 +3,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Mapping
 
-from utils.errors import InvalidGidError, InvalidUidError, InvalidShellError
+from utils.errors import InvalidGidError, InvalidUidError, InvalidShellError, ValidationError
 from utils.validators import validate_username
 
 ADMIN_GROUP_NAMES = frozenset({"sudo", "wheel", "adm"})
@@ -246,14 +246,16 @@ class SystemUser:
             status=_coerce_enum(payload.get("status"), AccountStatus, AccountStatus.UNKNOWN),
             user_type=_coerce_enum(payload.get("user_type"), UserType, UserType.REGULAR),
             privilege_level=_coerce_enum(payload.get("privilege_level"), PrivilegeLevel, PrivilegeLevel.NONE),
-            is_sudo=bool(payload.get("is_sudo", False)),
+            is_sudo=_coerce_bool(payload.get("is_sudo", False), field_name="is_sudo"),
             expires_at=_coerce_date(payload.get("expires_at")),
             password_last_changed_at=_coerce_date(payload.get("password_last_changed_at")),
             password_max_days=_coerce_int(payload.get("password_max_days")),
             password_warn_days = _coerce_int(payload.get("password_warn_days")),
             inactivity_days = _coerce_int(payload.get("inactivity_days")),
-            requires_password_change=bool(payload.get("requires_password_change", False)),
-            account_locked=bool(payload.get("account_locked", False)),
+            requires_password_change=_coerce_bool(
+                payload.get("requires_password_change", False),
+                field_name="requires_password_change"),
+            account_locked=_coerce_bool(payload.get("account_locked", False), PasswordStatus, PasswordStatus.UNKNOWN),
             password_status=_coerce_enum(payload.get("password_status"), PasswordStatus, PasswordStatus.UNKNOWN),
             gecos=_coerce_optional_str(payload.get("gecos")),
             metadata=dict(payload.get("metadata") or {}),
@@ -336,13 +338,15 @@ class UserCreateSpec:
             uid=_coerce_int(cli_data.get("uid")),
             gid=_coerce_int(cli_data.get("gid")),
             home=_coerce_optional_str(cli_data.get("home")),
-            create_home=bool(cli_data.get("create_home", True)),
+            create_home=_coerce_bool(cli_data.get("create_home", True), field_name="create_home"),
             shell=_coerce_optional_str(cli_data.get("shell")) or DEFAULT_USER_SHELL,
             groups=_coerce_groups(cli_data.get("groups")),
             template=_coerce_optional_str(cli_data.get("template")),
             limits=dict(cli_data.get("limits") or {}),
             initial_password_policy=dict(cli_data.get("initial_password_policy") or {}),
-            force_password_change=bool(cli_data.get("force_password_change", False)),
+            force_password_change=_coerce_bool(
+                cli_data.get("force_password_change", False),
+                field_name="force_password_change"),
             metadata=dict(cli_data.get("metadata") or {}),
             origin=origin, 
         )
@@ -452,7 +456,10 @@ def _coerce_int(value: Any) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    return int(str(value).strip())
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise InvalidUidError(f"invalid integer value: {value!r}") from exc
 
 def _coerce_groups(value: Any) -> list[str]:
     if value is None:
@@ -481,6 +488,28 @@ def _coerce_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value))
+
+def _coerce_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return bool
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValidationError(f"{field_name} must be a boolean-like value (0/1 for integers)")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        truthy = {"true", "yes", "1"}
+        falsy = {"false", "no", "0"}
+        if normalized in truthy:
+            return True
+        if normalized in falsy:
+            return False
+        raise ValidationError(
+            f"{field_name} must be one of: true/false, yes/no, 1/0 (recived {value!r})"
+        )
+    if value is None:
+        return False
+    raise ValidationError(f"{field_name} must be a boolean-like value")
 
 def _date_to_iso(value: date | None) -> str | None:
     return value.isoformat() if value else None
