@@ -255,7 +255,7 @@ class SystemUser:
             requires_password_change=_coerce_bool(
                 payload.get("requires_password_change", False),
                 field_name="requires_password_change"),
-            account_locked=_coerce_bool(payload.get("account_locked", False), PasswordStatus, PasswordStatus.UNKNOWN),
+            account_locked=_coerce_bool(payload.get("account_locked", False), field_name="account_locked"),
             password_status=_coerce_enum(payload.get("password_status"), PasswordStatus, PasswordStatus.UNKNOWN),
             gecos=_coerce_optional_str(payload.get("gecos")),
             metadata=dict(payload.get("metadata") or {}),
@@ -283,7 +283,7 @@ class UserStatus:
 
 @dataclass(slots=True)
 class UserCreateSpec:
-    username:str
+    username: str
     uid: int | None = None
     gid: int | None = None
     home: str | None = None
@@ -299,8 +299,8 @@ class UserCreateSpec:
 
     def __post_init__(self) -> None:
         self.username = validate_username(self.username, allow_reserved=True)
-        self.uid = SystemUser._validate_non_negative_int(self.uid, "uid")
-        self.gid = SystemUser._validate_non_negative_int(self.gid, "gid")
+        self.uid = SystemUser._validate_non_negative_int(self.uid, "uid", InvalidUidError)
+        self.gid = SystemUser._validate_non_negative_int(self.gid, "gid", InvalidGidError)
         self.shell = (self.shell or "").strip()
         if not self.shell:
             raise InvalidShellError("shell must be a non-empty string")
@@ -386,8 +386,13 @@ class UserUpdateSpec:
         self.username = validate_username(self.username, allow_reserved=True)
 
         if self.new_home is not None:
+            self.new_home = str(self.new_home).strip()
+            if not self.new_home:
+                raise ValidationError("new_home must be a non-empty string.")
+            
+        if self.new_shell is not None:
             if not isinstance(self.new_shell, str) or not self.new_shell.strip():
-                raise InvalidShellError("new_shell must be a non-empty string")
+                raise InvalidShellError("new_shell must be a non-empty string.")
             self.new_shell = self.new_shell.strip()
         
         self.groups = _coerce_groups(self.groups)
@@ -408,6 +413,7 @@ class UserUpdateSpec:
             and self.password_warn_days is not None
             and self.password_warn_days > self.password_max_days
         ):
+            raise ValidationError("password_warn_days cannot be greater than password_max_days")
 
 
     def to_dict(self) -> dict[str, Any]:
@@ -520,7 +526,7 @@ def _coerce_date(value: Any) -> date | None:
 
 def _coerce_bool(value: Any, *, field_name: str) -> bool:
     if isinstance(value, bool):
-        return bool
+        return value
     if isinstance(value, int):
         if value in (0, 1):
             return bool(value)
