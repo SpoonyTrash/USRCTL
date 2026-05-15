@@ -150,6 +150,8 @@ class SystemUser:
     ) -> int | None:
         if value is None:
             return None
+        if isinstance(value, bool):
+            raise error_cls(f"{field_name}")
         if not isinstance(value, int) or value < 0:
             raise error_cls(f"{field_name} must be a non-negative integer")
         return value
@@ -308,7 +310,7 @@ class UserCreateSpec:
     origin: ModelOrigin = ModelOrigin.CLI_INPUT
 
     def __post_init__(self) -> None:
-        self.origin = _coerce_enum(self.origin, ModelOrigin, ModelOrigin.CLI_INPUT)
+        self.origin = _coerce_enum_strict(self.origin, ModelOrigin, field_name="origin")
         allow_reserved = self.origin in (ModelOrigin.SYSTEM, ModelOrigin.BACKUP)
         self.username = validate_username(self.username, allow_reserved=allow_reserved)
         self.create_home = _coerce_bool(self.create_home, field_name="create_home")
@@ -534,6 +536,8 @@ def _coerce_int(
     ) -> int | None:
     if value in (None, ""):
         return None
+    if isinstance(value, bool):
+        raise error_cls(f"{field_name} must be an integer, not boolean.")
     if isinstance(value, int):
         return value
     try:
@@ -547,7 +551,10 @@ def _coerce_groups(value: Any) -> list[str]:
     if isinstance(value, str):
         parts = [part.strip() for part in value.split(",")]
     else:
-        parts = [str(part).strip() for part in value]
+        try:
+            parts = [str(part).strip() for part in value]
+        except TypeError as exc:
+            raise ValidationError("groups must be a string or iterable of strings.") from exc
     return sorted({part for part in parts if part})
 
 def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Any:
@@ -559,6 +566,23 @@ def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Any:
         return enum_cls(value)
     except ValueError:
         return default
+    
+def _coerce_enum_strict(
+    value: Any,
+    enum_cls: type[Enum],
+    *,
+    field_name: str,
+    error_cls: type[Exception] = ValidationError
+) -> Any:
+    if isinstance(value, enum_cls):
+        return value
+    if value is None:
+        raise error_cls(f"{field_name} is required and must be one of: {', '.join(member.value for member in enum_cls)}")
+    try:
+        return enum_cls(value)
+    except ValueError as exc:
+        allowed = ", ".join(member.value for member in enum_cls)
+    raise error_cls(f"{field_name} must be one of: {allowed} (received {value!r})") from exc
 
 def _coerce_date(value: Any) -> date | None:
     if value is None or value == "":
