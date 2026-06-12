@@ -12,7 +12,7 @@ RECOMMENDED_MEMBER_LIMIT = 100
 ADMIN_GROUP_NAMES = frozenset({"sudo", "wheel", "admin"})
 SERVICE_GROUP_NAMES = frozenset(
     {
-        "deamon",
+        "daemon",
         "bin",
         "sys",
         "systemd-journal",
@@ -78,7 +78,7 @@ class MembershipAction(str, Enum):
     REPLACE = "replace"
     LIST = "list"
 
-class MemberShipType(str, Enum):
+class MembershipType(str, Enum):
     EXPLICIT = "explicit"
     PRIMARY = "primary"
     SECONDARY = "secondary"
@@ -86,6 +86,7 @@ class MemberShipType(str, Enum):
     SYSTEM_DETECTED = "system_detected"
     UNKNOWN = "unknown"
 
+@dataclass(slots=True)
 class SystemGroup:
     groupname: str
     gid: int | None = None
@@ -187,11 +188,12 @@ class SystemGroup:
         return normalized in self.all_members
     
     def _normalize_and_validate(self) -> None:
-        self.groupname = validate_groupname(self.groupname, allow_reserved=True)
+        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.SYSTEM)
+        allow_reserved = self.origin in {GroupOrigin.SYSTEM, GroupOrigin.BACKUP}
+        self.groupname = validate_groupname(self.groupname, allow_reserved=allow_reserved)
         self.gid = _validate_optional_gid(self.gid)
         self.group_type = _coerce_enum(self.group_type, GroupType, GroupType.UNKNOWN)
         self.status = _coerce_enum(self.status, GroupStatus, GroupStatus.UNKNOWN)
-        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.SYSTEM)
         self.is_admin = _coerce_bool(self.is_admin, field_name="is_admin")
         self.is_protected = _coerce_bool(self.is_protected, field_name="is_protected")
 
@@ -242,7 +244,7 @@ class SystemGroup:
             "group_type": self.group_type.value,
             "status": self.status.value,
             "is_admin": self.is_administrative_group,
-            "is_protected": self.is_protected,
+            "is_protected": self.is_protected_group,
             "member_count": self.member_count,
             "origin": self.origin.value
         }
@@ -251,7 +253,7 @@ class SystemGroup:
         return {
             "groupname": self.groupname,
             "gid": self.gid,
-            "group_type": self.group_type,
+            "group_type": self.group_type.value,
             "status": self.status.value,
             "members": list(self.members),
             "member_count": self.member_count,
@@ -314,10 +316,10 @@ class SystemGroup:
     @classmethod
     def from_etc_group_line(cls, line: str) -> "SystemGroup":
         if not isinstance(line, str) or not line.strip():
-            raise GroupMembershipError("group entry line must be a non-empty string")
+            raise GroupMembershipError("group entry line must be a non-empty string.")
         parts = line.rstrip("\n").split(":")
         if len(parts) != 4:
-            raise GroupMembershipError("group entry line must contain four colon-separated fields")
+            raise GroupMembershipError("group entry line must contain four colon-separated fields.")
         groupname, _password_marker, gid, members = parts
         return cls.from_group_entry(
             {
@@ -332,7 +334,7 @@ class SystemGroup:
     @classmethod
     def from_system_data(cls, payload: Mapping[str, Any]) -> "SystemGroup":
         return cls(
-            groupname=str(payload.get("groupname", payload.get("name",""))).split,
+            groupname=str(payload.get("groupname", payload.get("name", ""))).strip(),
             gid=_coerce_optional_int(payload.get("gid"), field_name="gid", error_cls=InvalidGidError),
             members=_coerce_member_list(payload.get("members")),
             primary_members=_coerce_member_list(payload.get("primary_members")),
@@ -380,13 +382,13 @@ class SystemGroup:
         )
     
     @classmethod
-    def membership_opertion(
+    def membership_operation(
         cls,
         groupname: str,
         username: str,
         action: MembershipAction,
         *,
-        membership_type: MemberShipType = MemberShipType.SECONDARY,
+        membership_type: MembershipType = MembershipType.SECONDARY,
         force: bool = False,
         safe: bool = True,
         metadata: Mapping[str, Any] | None = None
@@ -404,12 +406,12 @@ class SystemGroup:
 @dataclass(slots=True)
 class GroupMemberRef:
     username: str
-    membership_type: MemberShipType = MemberShipType.UNKNOWN
+    membership_type: MembershipType = MembershipType.UNKNOWN
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.username = validate_username(self.username, allow_reserved=True)
-        self.membership_type = _coerce_enum(self.membership_type, MemberShipType, MemberShipType.UNKNOWN)
+        self.membership_type = _coerce_enum(self.membership_type, MembershipType, MembershipType.UNKNOWN)
         self.metadata = _safe_metadata(self.metadata)
 
     def to_dict(self) -> dict[str, Any]:
@@ -430,7 +432,9 @@ class GroupCreateSpec:
     origin: GroupOrigin = GroupOrigin.CLI_INPUT
 
     def __post_init__(self) -> None:
-        self.groupname = validate_groupname(self.groupname, allow_reserved=True)
+        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.CLI_INPUT)
+        allow_reserved = self.origin in {GroupOrigin.SYSTEM, GroupOrigin.BACKUP}
+        self.groupname = validate_groupname(self.groupname, allow_reserved=allow_reserved)
         self.gid = _validate_optional_gid(self.gid)
         self.group_type = _coerce_enum(self.group_type, GroupType, GroupType.NORMAL)
         self.members = _dedupe_names(self.members, field_name="members", validate_as_username=True)
@@ -513,7 +517,7 @@ class GroupUpdateSpec:
             self.replace_members = _dedupe_names(self.replace_members, field_name="replace_members", validate_as_username=True)
         overlap = set(self.members_to_add).intersection(self.members_to_remove)
         if overlap:
-            raise GroupMembershipError("members cannot be added and removed in the same update", details={"members": sorted(overlap)})
+            raise GroupMembershipError("members cannot be added and removed in the same update.", details={"members": sorted(overlap)})
         self.metadata = _safe_metadata(self.metadata)
         self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.CLI_INPUT)
 
@@ -572,7 +576,7 @@ class GroupMembershipSpec:
     groupname: str
     username: str | None = None
     action: MembershipAction = MembershipAction.LIST
-    membership_type: MemberShipType = MemberShipType.SECONDARY
+    membership_type: MembershipType = MembershipType.SECONDARY
     force: bool = False
     safe: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -583,14 +587,14 @@ class GroupMembershipSpec:
         self.action = _coerce_enum(self.action, MembershipAction, MembershipAction.LIST)
         self.membership_type = _coerce_enum(
             self.membership_type,
-            MemberShipType,
-            MemberShipType.SECONDARY
+            MembershipType,
+            MembershipType.SECONDARY
         )
         self.force = _coerce_bool(self.force, field_name="force")
         self.safe = _coerce_bool(self.safe, field_name="safe")
         if self.username is None:
             if self.action != MembershipAction.LIST:
-                raise GroupMembershipError("username is required for membership changes")
+                raise GroupMembershipError("username is required for membership changes.")
         else:
             self.username = validate_username(self.username, allow_reserved=True)
         self.metadata = _safe_metadata(self.metadata)
@@ -602,7 +606,7 @@ class GroupMembershipSpec:
         groupname: str,
         username: str,
         *,
-        membership_type: MemberShipType = MemberShipType.SECONDARY,
+        membership_type: MembershipType = MembershipType.SECONDARY,
         force: bool = False,
         safe: bool = True
     ) -> "GroupMembershipSpec":
@@ -621,7 +625,7 @@ class GroupMembershipSpec:
         groupname: str,
         username: str,
         *,
-        membership_type: MemberShipType = MemberShipType.SECONDARY,
+        membership_type: MembershipType = MembershipType.SECONDARY,
         force: bool = False,
         safe: bool = True
     ) -> "GroupMembershipSpec":
@@ -650,7 +654,7 @@ class GroupMembershipSpec:
         return cls(
             groupname=groupname,
             action=MembershipAction.REPLACE,
-            membership_type=MemberShipType.EXPLICIT,
+            membership_type=MembershipType.EXPLICIT,
             force=force,
             safe=safe,
             metadata=dict(metadata or {})
@@ -664,10 +668,10 @@ class GroupMembershipSpec:
         origin: GroupOrigin = GroupOrigin.CLI_INPUT
     ) -> "GroupMembershipSpec":
         return cls(
-            groupname=str(cli_data("groupname", cli_data.get("group", ""))).strip(),
+            groupname=str(cli_data.get("groupname", cli_data.get("group", ""))).strip(),
             username=_coerce_optional_str(cli_data.get("username", cli_data.get("user"))),
             action=_coerce_enum(cli_data.get("action"), MembershipAction, MembershipAction.LIST),
-            membership_type=_coerce_enum(cli_data.get("membership_type"), MemberShipType, MemberShipType.SECONDARY),
+            membership_type=_coerce_enum(cli_data.get("membership_type"), MembershipType, MembershipType.SECONDARY),
             force=_coerce_bool(cli_data.get("force", False), field_name="force"),
             safe=_coerce_bool(cli_data.get("safe", True), field_name="safe"),
             metadata=dict(cli_data.get("metadata") or {}),
@@ -690,6 +694,7 @@ class GroupMembershipSpec:
 class GroupSummary:
     groupname: str
     gid: int | None = None
+    member_count: int = 0
     group_type: GroupType = GroupType.UNKNOWN
     is_admin: bool = False
     is_protected: bool = False
@@ -729,7 +734,7 @@ class GroupSecurityInfo:
     grants_elevated_privileges: bool = False
     is_protected: bool = False
     has_administrative_members: bool = False
-    deletion_should_be_bolcked: bool = False
+    deletion_should_be_blocked: bool = False
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -738,7 +743,10 @@ class GroupSecurityInfo:
         )
         self.is_protected = _coerce_bool(self.is_protected, field_name="is_protected")
         self.has_administrative_members = _coerce_bool(self.has_administrative_members, field_name="has_administrative_members")
-        self.deletion_should_be_blocked = _coerce_bool(self.deletion_should_be_bolcked, field_name="deletion_should_be_blocked")
+        self.deletion_should_be_blocked = _coerce_bool(
+            self.deletion_should_be_bolcked, 
+            field_name="deletion_should_be_blocked"
+        )
         self.warnings = _dedupe_text(self.warnings, field_name="warnings")
     
     @classmethod
@@ -763,7 +771,7 @@ def _validate_optional_gid(value: Any) -> int | None:
 
 def _validate_non_negative_int(value: Any, field_name: str, error_cls: type[Exception]) -> int:
     if isinstance(value, bool):
-        raise error_cls(f"{field_name} must be an integer, not boolean")
+        raise error_cls(f"{field_name} must be an integer, not boolean.")
     if not isinstance(value, int):
         raise error_cls(f"{field_name} must be an integer.")
     if value < 0:
@@ -774,7 +782,7 @@ def _coerce_optional_int(value: Any, *, field_name: str, error_cls: type[Excepti
     if value is None or value == "":
         return None
     if isinstance(value, bool):
-        raise error_cls(f"{field_name} must be an integer, not boolean")
+        raise error_cls(f"{field_name} must be an integer, not boolean.")
     try:
         normalized = int(value)
     except (TypeError, ValueError) as exc:
@@ -786,7 +794,28 @@ def _coerce_optional_int(value: Any, *, field_name: str, error_cls: type[Excepti
 def _coerce_bool(value: Any, *, field_name: str) -> bool:
     if isinstance(value, bool):
         return value
-    raise ValidationError(f"{field_name} must be boolean.", details={"field": field_name})
+    
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValidationError(
+            f"{field_name} must be a boolean-like value",
+            details={"field": field_name, "value": value}
+        )
+    
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+        raise ValidationError(
+            f"{field_name} must be one of: true/false, yes/no, 1/0.",
+            details={"field": field_name, "value": value}
+        )
+    raise ValidationError(
+        f"{field_name} must be boolean-like value.", 
+        details={"field": field_name, "value": value})
 
 def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Any:
     if value is None or value == "":
@@ -827,23 +856,23 @@ def _coerce_member_list(values: Any) -> list[str]:
     if isinstance(values, str):
         values = [part for part in values.split(",") if part]
     if not isinstance(values, Sequence):
-        raise GroupMembershipError("members must be a sequence of usernames")
+        raise GroupMembershipError("members must be a sequence of usernames.")
     return _dedupe_names(values, field_name="members", validate_as_username=True)
     
 def _dedupe_names(values: Any, *, field_name: str, validate_as_username: bool) -> list[str]:
     if values is None:
         return []
     if isinstance(values, str):
-        raise GroupMembershipError(f"{field_name} must be a sequence, not a string")
+        raise GroupMembershipError(f"{field_name} must be a sequence, not a string.")
     if not isinstance(values, Sequence):
-        raise GroupMembershipError(f"{field_name} must be a sequence")
+        raise GroupMembershipError(f"{field_name} must be a sequence.")
     
     normalized: list[str] = []
     seen: set[str] = set()
     for raw_value in values:
         value = str(raw_value).strip()
         if not value:
-            raise GroupMembershipError(f"{field_name} cannot contain empty values")
+            raise GroupMembershipError(f"{field_name} cannot contain empty values.")
         value = validate_username(value, allow_reserved=True) if validate_as_username else value
         if value not in seen:
             seen.add(value)
@@ -856,7 +885,7 @@ def _dedupe_text(values: Any, *, field_name: str) -> list[str]:
     if isinstance(values, str):
         values = [values]
     if not isinstance(values, Sequence):
-        raise ValidationError(f"{field_name} must be a sequence")
+        raise ValidationError(f"{field_name} must be a sequence.")
     normalized: list[str] = []
     seen: set[str] = set()
     for raw_value in values:
@@ -879,12 +908,12 @@ def _safe_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     if metadata is None:
         return {}
     if not isinstance(metadata, Mapping):
-        raise ValidationError("metadata must be a mapping")
+        raise ValidationError("metadata must be a mapping.")
     safe: dict[str, Any] = {}
     for key, value in metadata.items():
         normalized_key = str(key).strip()
         if not normalized_key:
-            raise ValidationError("metadata keys cannot be empty")
+            raise ValidationError("metadata keys cannot be empty.")
         if normalized_key.lower() in _SENSITIVE_METADATA_KEYS:
             continue
         safe[normalized_key] = _json_compatible(value)
@@ -915,5 +944,11 @@ __all__ = [
     "GroupStatus",
     "MembershipType",
     "GroupOrigin",
-    "MembershipAction"
+    "MembershipAction",
+    "NORMAL_GROUP_MIN_GID",
+    "ROOT_GID",
+    "RECOMMENDED_MEMBER_LIMIT",
+    "ADMIN_GROUP_NAMES",
+    "SERVICE_GROUP_NAMES",
+    "PROTECTED_GROUP_NAME"
 ]
