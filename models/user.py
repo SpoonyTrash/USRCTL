@@ -140,8 +140,7 @@ class SystemUser:
             raise InvalidShellError("shell must be a non-empty string")
         self.shell = self.shell.strip()
 
-        self.groups = sorted({str(group).strip() for group in self.groups if str(group).strip()})
-    
+        self.groups = _coerce_groups(self.groups)
     @staticmethod
     def _validate_non_negative_int(
         value: int | None, 
@@ -322,7 +321,7 @@ class UserCreateSpec:
         self.shell = (self.shell or "").strip()
         if not self.shell:
             raise InvalidShellError("shell must be a non-empty string")
-        self.groups = sorted({str(group).strip() for group in self.groups if str(group).strip()})
+        self.groups = _coerce_groups(self.groups)
     
     @classmethod
     def minimal(cls, username: str) -> "UserCreateSpec":
@@ -509,6 +508,7 @@ class UserSummary:
 
     def __post_init__(self) -> None:
         self.status = _coerce_enum(self.status, AccountStatus, AccountStatus.UNKNOWN)
+        self.is_sudo = _coerce_bool(self.is_sudo, field_name="is_sudo")
 
     def to_dict(self) -> dict[str, Any]:
         return {
