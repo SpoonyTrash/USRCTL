@@ -283,13 +283,13 @@ class SystemGroup:
     def security_info(self) -> "GroupSecurityInfo":
         warnings: list[str] = []
         if self.is_root_group:
-            warnings.append("Root group must not be modified casually")
+            warnings.append("Root group must not be modified casually.")
         if self.is_protected_group:
-            warnings.append("Protected group requires strong validation before changes")
+            warnings.append("Protected group requires strong validation before changes.")
         if self.is_administrative_group:
-            warnings.append("Members may receive elevated privileges")
+            warnings.append("Members may receive elevated privileges.")
         if self.has_many_members:
-            warnings.append("Group has more members than the recommended reporting limit")
+            warnings.append("Group has more members than the recommended reporting limit.")
 
         return GroupSecurityInfo(
             grants_elevated_privileges=self.is_administrative_group or self.is_root_group,
@@ -512,6 +512,7 @@ class GroupUpdateSpec:
     replace_members: list[str] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     origin: GroupOrigin = GroupOrigin.CLI_INPUT
+    allow_reserved: bool = False
 
     def __post_init__(self) -> None:
         self.groupname = validate_groupname(self.groupname, allow_reserved=True)
