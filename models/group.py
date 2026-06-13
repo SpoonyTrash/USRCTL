@@ -283,13 +283,13 @@ class SystemGroup:
     def security_info(self) -> "GroupSecurityInfo":
         warnings: list[str] = []
         if self.is_root_group:
-            warnings.append("root group must not be modified casually")
+            warnings.append("Root group must not be modified casually")
         if self.is_protected_group:
-            warnings.append("protected group requires strong validation before changes")
+            warnings.append("Protected group requires strong validation before changes")
         if self.is_administrative_group:
-            warnings.append("members may receive elevated privileges")
+            warnings.append("Members may receive elevated privileges")
         if self.has_many_members:
-            warnings.append("group has more members than the recommended reporting limit")
+            warnings.append("Group has more members than the recommended reporting limit")
 
         return GroupSecurityInfo(
             grants_elevated_privileges=self.is_administrative_group or self.is_root_group,
@@ -307,8 +307,8 @@ class SystemGroup:
             members=_coerce_member_list(entry.get("members")),
             group_type=_coerce_group_type(entry.get("group_type"), entry),
             status=_coerce_enum(entry.get("status"), GroupStatus, GroupStatus.UNKNOWN),
-            is_admin=_coerce_bool(entry.get("is_admin", False), field_name="is_admin"),
-            is_protected=_coerce_bool(entry.get("is_protected", False), field_name="is_protected"),
+            is_admin=_coerce_bool(entry.get("is_admin", False), field_name="is_admin", default=False),
+            is_protected=_coerce_bool(entry.get("is_protected", False), field_name="is_protected", default=False),
             metadata=dict(entry.get("metadata") or {}),
             origin=_coerce_enum(entry.get("origin"), GroupOrigin, GroupOrigin.SYSTEM)
         )
@@ -342,8 +342,8 @@ class SystemGroup:
             inherited_members=_coerce_member_list(payload.get("inherited_members")),
             group_type=_coerce_group_type(payload.get("group_type"), payload),
             status=_coerce_enum(payload.get("status"), GroupStatus, GroupStatus.UNKNOWN),
-            is_admin=_coerce_bool(payload.get("is_admin", False), field_name="is_admin"),
-            is_protected=_coerce_bool(payload.get("is_protected", False), field_name="is_protected"),
+            is_admin=_coerce_bool(payload.get("is_admin", False), field_name="is_admin", default=False),
+            is_protected=_coerce_bool(payload.get("is_protected", False), field_name="is_protected", default=False),
             metadata=dict(payload.get("metadata") or {}),
             origin=_coerce_enum(payload.get("origin"), GroupOrigin, GroupOrigin.SYSTEM)
         )
@@ -355,7 +355,7 @@ class SystemGroup:
         *,
         gid: int | None = None,
         metadata: Mapping[str, Any] | None = None,
-        origin: GroupOrigin = GroupOrigin.REPORT
+        origin: GroupOrigin = GroupOrigin.SYSTEM
     ) -> "SystemGroup":
         return cls(groupname=groupname, gid=gid, metadata=dict(metadata or {}), origin=origin)
     
@@ -391,7 +391,8 @@ class SystemGroup:
         membership_type: MembershipType = MembershipType.SECONDARY,
         force: bool = False,
         safe: bool = True,
-        metadata: Mapping[str, Any] | None = None
+        metadata: Mapping[str, Any] | None = None,
+        allow_reserved: bool = False
     ) -> "GroupMembershipSpec":
         return GroupMembershipSpec(
             groupname=groupname,
@@ -400,7 +401,8 @@ class SystemGroup:
             membership_type=membership_type,
             force=force,
             safe=safe,
-            metadata=dict(metadata or {})
+            metadata=dict(metadata or {}),
+            allow_reserved=allow_reserved
         )
     
 @dataclass(slots=True)
@@ -432,14 +434,19 @@ class GroupCreateSpec:
     origin: GroupOrigin = GroupOrigin.CLI_INPUT
 
     def __post_init__(self) -> None:
-        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.CLI_INPUT)
+        self.origin = _coerce_enum_strict(
+            self.origin, 
+            GroupOrigin, 
+            field_name="origin")
         allow_reserved = self.origin in {GroupOrigin.SYSTEM, GroupOrigin.BACKUP}
         self.groupname = validate_groupname(self.groupname, allow_reserved=allow_reserved)
         self.gid = _validate_optional_gid(self.gid)
-        self.group_type = _coerce_enum(self.group_type, GroupType, GroupType.NORMAL)
+        self.group_type = _coerce_enum_strict(
+            self.group_type, 
+            GroupType, 
+            field_name="group_type")
         self.members = _dedupe_names(self.members, field_name="members", validate_as_username=True)
         self.metadata = _safe_metadata(self.metadata)
-        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.CLI_INPUT)
 
     @classmethod
     def minimal(cls, groupname: str) -> "GroupCreateSpec":
@@ -479,7 +486,7 @@ class GroupCreateSpec:
         return cls(
             groupname=str(cli_data.get("groupname", cli_data.get("name", ""))).strip(),
             gid=_coerce_optional_int(cli_data.get("gid"), field_name="gid", error_cls=InvalidGidError),
-            group_type=_coerce_enum(cli_data.get("group_type"), GroupType, GroupType.NORMAL),
+            group_type=cli_data.get("group_type", GroupType.NORMAL),
             members=_coerce_member_list(cli_data.get("members")),
             metadata=dict(cli_data.get("metadata") or {}),
             origin=origin
@@ -509,7 +516,7 @@ class GroupUpdateSpec:
     def __post_init__(self) -> None:
         self.groupname = validate_groupname(self.groupname, allow_reserved=True)
         if self.new_groupname is not None:
-            self.new_groupname = validate_groupname(self.new_groupname, allow_reserved=True)
+            self.new_groupname = validate_groupname(self.new_groupname, allow_reserved=False)
         self.new_gid = _validate_optional_gid(self.new_gid)
         self.members_to_add = _dedupe_names(self.members_to_add, field_name="members_to_add", validate_as_username=True)
         self.members_to_remove = _dedupe_names(self.members_to_remove, field_name="members_to_remove", validate_as_username=True)
@@ -519,7 +526,16 @@ class GroupUpdateSpec:
         if overlap:
             raise GroupMembershipError("members cannot be added and removed in the same update.", details={"members": sorted(overlap)})
         self.metadata = _safe_metadata(self.metadata)
-        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.CLI_INPUT)
+        self.origin = _coerce_enum_strict(
+            self.origin, 
+            GroupOrigin, 
+            field_name="origin"
+        )
+        if not self.has_changes:
+            raise ValidationError(
+                "Group update requires at least one change.",
+                details={"groupname": self.groupname}
+            )
 
     @property
     def has_changes(self) -> bool:
@@ -581,14 +597,23 @@ class GroupMembershipSpec:
     safe: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
     origin: GroupOrigin = GroupOrigin.CLI_INPUT
+    allow_reserved: bool = False
 
     def __post_init__(self) -> None:
-        self.groupname = validate_groupname(self.groupname, allow_reserved=True)
-        self.action = _coerce_enum(self.action, MembershipAction, MembershipAction.LIST)
-        self.membership_type = _coerce_enum(
+        self.allow_reserved = _coerce_bool(
+            self.allow_reserved,
+            field_name="allow_reserved",
+            default=False
+        )
+        self.groupname = validate_groupname(self.groupname, allow_reserved=self.allow_reserved)
+        self.action = _coerce_enum_strict(
+            self.action,
+            MembershipAction, 
+            field_name="action")
+        self.membership_type = _coerce_enum_strict(
             self.membership_type,
             MembershipType,
-            MembershipType.SECONDARY
+            field_name="membership_type"
         )
         self.force = _coerce_bool(self.force, field_name="force")
         self.safe = _coerce_bool(self.safe, field_name="safe")
@@ -598,7 +623,10 @@ class GroupMembershipSpec:
         else:
             self.username = validate_username(self.username, allow_reserved=True)
         self.metadata = _safe_metadata(self.metadata)
-        self.origin = _coerce_enum(self.origin, GroupOrigin, GroupOrigin.CLI_INPUT)
+        self.origin = _coerce_enum_strict(
+            self.origin, 
+            GroupOrigin, 
+            field_name="origin")
     
     @classmethod
     def add(
@@ -608,7 +636,8 @@ class GroupMembershipSpec:
         *,
         membership_type: MembershipType = MembershipType.SECONDARY,
         force: bool = False,
-        safe: bool = True
+        safe: bool = True,
+        allow_reserved: bool = False
     ) -> "GroupMembershipSpec":
         return cls(
             groupname=groupname,
@@ -616,7 +645,8 @@ class GroupMembershipSpec:
             action=MembershipAction.ADD,
             membership_type=membership_type,
             force=force,
-            safe=safe
+            safe=safe,
+            allow_reserved=allow_reserved
         )
     
     @classmethod
@@ -627,7 +657,8 @@ class GroupMembershipSpec:
         *,
         membership_type: MembershipType = MembershipType.SECONDARY,
         force: bool = False,
-        safe: bool = True
+        safe: bool = True,
+        allow_reserved: bool = False
     ) -> "GroupMembershipSpec":
         return cls(
             groupname=groupname,
@@ -635,12 +666,22 @@ class GroupMembershipSpec:
             action=MembershipAction.REMOVE,
             membership_type=membership_type,
             force=force,
-            safe=safe
+            safe=safe,
+            allow_reserved=allow_reserved
         )
 
     @classmethod
-    def list_members(cls, groupname: str) -> "GroupMembershipSpec":
-        return cls(groupname=groupname, action=MembershipAction.LIST)
+    def list_members(
+        cls, 
+        groupname: str,
+        *,
+        allow_reserved: bool = False
+    ) -> "GroupMembershipSpec":
+        return cls(
+            groupname=groupname, 
+            action=MembershipAction.LIST,
+            allow_reserved=allow_reserved
+        )
     
     @classmethod
     def replace(
@@ -649,7 +690,8 @@ class GroupMembershipSpec:
         *,
         force: bool = False,
         safe: bool = True,
-        metadata: Mapping[str, Any] | None = None
+        metadata: Mapping[str, Any] | None = None,
+        allow_reserved: bool = False
     ) -> "GroupMembershipSpec":
         return cls(
             groupname=groupname,
@@ -657,7 +699,8 @@ class GroupMembershipSpec:
             membership_type=MembershipType.EXPLICIT,
             force=force,
             safe=safe,
-            metadata=dict(metadata or {})
+            metadata=dict(metadata or {}),
+            allow_reserved=allow_reserved
         )
     
     @classmethod
@@ -665,17 +708,23 @@ class GroupMembershipSpec:
         cls,
         cli_data: Mapping[str, Any],
         *,
-        origin: GroupOrigin = GroupOrigin.CLI_INPUT
+        origin: GroupOrigin = GroupOrigin.CLI_INPUT,
+        allow_reserved: bool = False
     ) -> "GroupMembershipSpec":
         return cls(
             groupname=str(cli_data.get("groupname", cli_data.get("group", ""))).strip(),
             username=_coerce_optional_str(cli_data.get("username", cli_data.get("user"))),
-            action=_coerce_enum(cli_data.get("action"), MembershipAction, MembershipAction.LIST),
-            membership_type=_coerce_enum(cli_data.get("membership_type"), MembershipType, MembershipType.SECONDARY),
+            action=cli_data.get("action", MembershipAction.LIST)
+            membership_type=cli_data.get("membership_type", MembershipType.SECONDARY),
             force=_coerce_bool(cli_data.get("force", False), field_name="force"),
             safe=_coerce_bool(cli_data.get("safe", True), field_name="safe"),
             metadata=dict(cli_data.get("metadata") or {}),
-            origin=origin
+            origin=origin,
+            allow_reserved=_coerce_bool(
+                cli_data.get("allow_reserved", allow_reserved),
+                field_name="allow_reserved",
+                default=False
+            )
         )
     
     def to_dict(self) -> dict[str, Any]:
@@ -686,6 +735,7 @@ class GroupMembershipSpec:
             "membership_type": self.membership_type.value,
             "force": self.force,
             "safe": self.safe,
+            "allow_reserved": self.allow_reserved,
             "metadata": _json_compatible(self.metadata),
             "origin": self.origin.value
         }
@@ -744,7 +794,7 @@ class GroupSecurityInfo:
         self.is_protected = _coerce_bool(self.is_protected, field_name="is_protected")
         self.has_administrative_members = _coerce_bool(self.has_administrative_members, field_name="has_administrative_members")
         self.deletion_should_be_blocked = _coerce_bool(
-            self.deletion_should_be_bolcked, 
+            self.deletion_should_be_blocked, 
             field_name="deletion_should_be_blocked"
         )
         self.warnings = _dedupe_text(self.warnings, field_name="warnings")
@@ -791,7 +841,19 @@ def _coerce_optional_int(value: Any, *, field_name: str, error_cls: type[Excepti
         raise error_cls(f"{field_name} must be a non-negative integer.")
     return normalized
 
-def _coerce_bool(value: Any, *, field_name: str) -> bool:
+def _coerce_bool(
+        value: Any, 
+        *, 
+        field_name: str,
+        default: bool | None = None
+    ) -> bool:
+    if value is None:
+        if default is not None:
+            return default
+        raise ValidationError(
+            f"{field_name} must be a boolean-like value.",
+            details={"field": field_name, "value": value}
+        )
     if isinstance(value, bool):
         return value
     
@@ -799,7 +861,7 @@ def _coerce_bool(value: Any, *, field_name: str) -> bool:
         if value in (0, 1):
             return bool(value)
         raise ValidationError(
-            f"{field_name} must be a boolean-like value",
+            f"{field_name} must be a boolean-like value.",
             details={"field": field_name, "value": value}
         )
     
@@ -817,19 +879,43 @@ def _coerce_bool(value: Any, *, field_name: str) -> bool:
         f"{field_name} must be boolean-like value.", 
         details={"field": field_name, "value": value})
 
-def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Any:
+def _coerce_enum(
+        value: Any, 
+        enum_cls: type[Enum], 
+        default: Enum
+    ) -> Any:
     if value is None or value == "":
         return default
     if isinstance(value, enum_cls):
         return value
     try:
         return enum_cls(str(value))
+    except ValueError:
+        return default
+    
+def _coerce_enum_strict(
+        value: Any,
+        enum_cls: type[Enum],
+        *,
+        field_name: str,
+        error_cls: type[Exception] = ValidationError
+) -> Any:
+    allowed = ", ".join(member.value for member in  enum_cls)
+
+    if isinstance(value, enum_cls):
+        return value
+    
+    if value is None or value == "":
+        raise error_cls(
+            f"{field_name} is required and must be one of: {allowed}"
+        )
+    
+    try:
+        return enum_cls(str(value))
     except ValueError as exc:
-        allowed = [member.value for member in enum_cls]
-        raise ValidationError(
-            f"Invalid {enum_cls.__name__}: {value!r}.",
-            details={"value": value, "allowed": allowed}
-        ) from exc
+        raise error_cls(
+            f"{field_name} must be one of: {allowed} (received {value!r})."
+        )
 
 def _coerce_group_type(value: Any, payload: Mapping[str, Any]) -> GroupType:
     explicit = _coerce_enum(value, GroupType, GroupType.UNKNOWN)
@@ -950,5 +1036,6 @@ __all__ = [
     "RECOMMENDED_MEMBER_LIMIT",
     "ADMIN_GROUP_NAMES",
     "SERVICE_GROUP_NAMES",
-    "PROTECTED_GROUP_NAME"
+    "PROTECTED_GROUP_NAME",
+    "RESERVED_STATUS_GROUP_NAMES"
 ]
