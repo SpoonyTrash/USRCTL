@@ -714,7 +714,7 @@ class GroupMembershipSpec:
         return cls(
             groupname=str(cli_data.get("groupname", cli_data.get("group", ""))).strip(),
             username=_coerce_optional_str(cli_data.get("username", cli_data.get("user"))),
-            action=cli_data.get("action", MembershipAction.LIST)
+            action=cli_data.get("action", MembershipAction.LIST),
             membership_type=cli_data.get("membership_type", MembershipType.SECONDARY),
             force=_coerce_bool(cli_data.get("force", False), field_name="force"),
             safe=_coerce_bool(cli_data.get("safe", True), field_name="safe"),
