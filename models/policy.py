@@ -926,7 +926,7 @@ def _coerce_bool(
         if value in {0, 1}:
             return bool(value)
         raise PolicyError(
-            f"{field_name} must be a boolean-like value."
+            f"{field_name} must be a boolean-like value.",
             details={"field": field_name, "value": value}
         )
     
