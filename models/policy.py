@@ -381,7 +381,7 @@ class InactivityPolicy(SecurityPolicy):
             {
                 "inactive_days": self.inactive_days,
                 "action": self.action.value,
-                "disable_account": self.disables_account,
+                "disables_account": self.disables_account,
                 "strict": self.strict,
                 "is_active": self.is_active,
                 "blocks_login": self.blocks_login
@@ -422,11 +422,11 @@ class LoginRestrictionPolicy(SecurityPolicy):
     ) -> None:
         super().__init__(name, PolicyType.LOGIN, status, target, origin, impact, description, warnings or [], dict(metadata or {}))
         self.login_allowed = _coerce_bool(login_allowed, field_name="login_allowed", default=True)
-        self.restricted_shell = restricted_shell
+        self.restricted_shell = _optional_str(restricted_shell)
         self.account_locked = _coerce_bool(account_locked, field_name="account_locked", default=False)
         self.interactive_access_disabled = _coerce_bool(interactive_access_disabled, field_name="interactive_access_disabled", default=False)
-        self.restriction_scope = restriction_scope
-        self.reason = reason
+        self.restriction_scope = _optional_str(restriction_scope)
+        self.reason = _optional_str(reason)
         self.restriction_type = _coerce_enum(restriction_type or self._infer_restriction_type(), LoginRestrictionType, LoginRestrictionType.UNKNOWN)
         self._validate_login_restriction()
         if self.blocks_login:
@@ -488,7 +488,7 @@ class UserSecurityPolicy:
         self.origin = _coerce_enum(self.origin, PolicyOrigin, PolicyOrigin.SYSTEM)
         self.impact = _coerce_enum(self.impact, PolicyImpact, PolicyImpact.LOW)
         self.warnings = [str(item) for item in self.warnings]
-        self.metadata = dict(self.metadata or {})
+        self.metadata = _safe_metadata(self.metadata)
 
     @property
     def blocks_login(self) -> bool:
@@ -612,12 +612,18 @@ class UserSecurityPolicy:
         origin: PolicyOrigin = PolicyOrigin.SYSTEM,
         metadata: Mapping[str, Any] | None = None
         ) -> Self:
+        account_locked_flag = _coerce_bool(account_locked, field_name="account_locked", default=False)
+        login_allowed_flag = (
+            not account_locked_flag
+            if login_allowed is None else _coerce_bool(login_allowed, field_name="login_allowed", default=True)
+        )
+
         login = LoginRestrictionPolicy(
-            login_allowed=(not account_locked if login_allowed is None else login_allowed),
+            login_allowed=login_allowed_flag,
             restricted_shell=restricted_shell,
-            account_locked=account_locked,
+            account_locked=account_locked_flag,
             target=username,
-            origin=origin
+            origin=origin,
         )
         expiration = ExpirationPolicy(
             expires_at=expires_at,
@@ -648,6 +654,8 @@ class UserSecurityPolicy:
         blocks_login: bool = False,
         origin: PolicyOrigin = PolicyOrigin.CLI,
     ) -> Self:
+        blocks_login_flag = _coerce_bool(blocks_login, field_name="blocks_login", default=False)
+        force_password_change_flag = _coerce_bool(force_password_change, field_name="force_password_change", default=False)
         return cls(
             username=username,
             expiration=ExpirationPolicy(
@@ -657,21 +665,21 @@ class UserSecurityPolicy:
             ) if expires_at is not None else None,
             password=PasswordPolicy(
                 max_password_age_days=max_password_age_days,
-                force_password_change=force_password_change,
+                force_password_change=force_password_change_flag,
                 target=username,
                 origin=origin
-            ) if max_password_age_days is not None or _coerce_bool(force_password_change, field_name="force_password_change", default=False) else None,
+            ) if max_password_age_days is not None or force_password_change_flag else None,
             inactivity=InactivityPolicy(
                 inactive_days=inactive_days,
                 target=username,
                 origin=origin
             ) if inactive_days is not None else None,
             login=LoginRestrictionPolicy(
-                login_allowed=(not blocks_login),
-                account_locked= blocks_login,
+                login_allowed=(not blocks_login_flag),
+                account_locked= blocks_login_flag,
                 target=username,
-                origin=origin
-            ) if blocks_login else None,
+                origin=origin,
+            ) if blocks_login_flag else None,
             origin=origin
         )
     
@@ -732,9 +740,13 @@ class PolicyApplySpec:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.username
+        #SIGO AQUI
+        self.username = validate_username(self.username, allow_reserved=True)
+        if not isinstance(self.policy, UserSecurityPolicy):
+            raise PolicyError("policy must be an instance of UserSecurityPolicy.", details={"field": "policy", "type": type(self.policy).__name__})
         self.dry_run = _coerce_bool(self.dry_run, field_name="dry_run", default=True)
         self.estimated_impact = _max_impact(_coerce_enum(self.estimated_impact, PolicyImpact, PolicyImpact.LOW), self.policy.impact)
+        self.metadata = _safe_metadata(self.metadata)
         self.requires_confirmation = _coerce_bool(self.requires_confirmation, field_name="requires_confirmation", default=True) or self.policy.has_critical_impact
 
     def to_dict(self) -> dict[str, Any]:
@@ -768,7 +780,25 @@ class PolicyUpdateSpec:
         self.new_max_password_age_days = _validate_optional_days(self.new_max_password_age_days, "new_max_password_age_days")
         self.new_inactive_days = _validate_optional_days(self.new_inactive_days, "new_inactive_days")
         if self.new_login_restriction is not None:
-            self.new_login_restriction = _coerce_enum(self.new_login_restriction, LoginRestrictionType, LoginRestrictionType.UNKNOWN)
+            self.new_login_restriction = _coerce_enum_strict(
+                self.new_login_restriction,
+                LoginRestrictionType,
+                field_name="new_login_restriction"
+            )
+        self.metadata = _safe_metadata(self.metadata)
+        if not self.has_changes:
+            raise PolicyError("Policy update requires at least one change.", details={"username": self.username})
+        
+    @property
+    def has_changes(self) -> bool:
+        return any([
+            self.new_expiration is not None,
+            self.new_max_password_age_days is not None,
+            self.new_inactive_days is not None,
+            self.new_login_restriction is not None,
+            self.force_password_change is not None,
+            bool(self.metadata)
+        ])
 
     def to_dict(self) -> dict[str, Any]:
         return _clean_dict(
@@ -779,7 +809,8 @@ class PolicyUpdateSpec:
                 "new_inactive_days": self.new_inactive_days,
                 "new_login_restriction": self.new_login_restriction.value if self.new_login_restriction else None,
                 "force_password_change": self.force_password_change,
-                "metadata": _json_safe(self.metadata)
+                "metadata": _json_safe(self.metadata),
+                "has_changes": self.has_changes
             }
         )
 
@@ -804,7 +835,7 @@ class PolicySummary:
             username=policy.username,
             expiration_status=policy.expiration.expiration_state.value if policy.expiration else ExpirationState.UNKNOWN.value,
             password_status="expired" if policy.password and policy.password.is_password_expired else "ok" if policy.password else PolicyStatus.UNKNOWN.value, 
-            inactivity=_int_or_none(policy.inactivity.inactive_days) if policy.inactivity else None,
+            inactivity=_int_or_none(policy.inactivity.inactive_days, field_name="inactive_days") if policy.inactivity else None,
             login_allowed=policy.login.login_allowed if policy.login else None,
             impact=policy.impact,
             warnings=policy.all_warnings
@@ -866,6 +897,9 @@ class PolicyDiff:
 def _validate_optional_days(value: int | None, field_name: str) ->  int | None:
     if value is None:
         return None
+
+    if isinstance(value, bool):
+        raise InactivityPolicyError(f"{field_name} must be an integer, not boolean.", details={"field": field_name, "value": value})
     try:
         days = int(value)
     except (TypeError, ValueError) as exc:
@@ -905,6 +939,27 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_json_safe(item) for item in value]
     return value
+
+def _safe_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, Mapping):
+        raise PolicyError("Metadata must be a mapping.", details={"metadata": metadata})
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        normalized_key = str(key).strip()
+        if not normalized_key:
+            raise PolicyError("Metadata keys cannot be empty.", details={"key": key})
+        if _looks_sensitive(normalized_key):
+            continue
+        safe[normalized_key] = _json_safe(value)
+    return safe
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
 
 def _coerce_bool(
     value: Any,
@@ -959,6 +1014,34 @@ def _coerce_enum(value: Any, enum_type: type[Enum], default: Any) -> Any:
             return default
         raise PolicyError(f"Invalid {enum_type.__name__} value.", details={"value": value}) from exc
     
+def _coerce_enum_strict(
+    value: Any,
+    enum_type: type[Enum],
+    *,
+    field_name: str,
+    error_cls: type[Exception] = PolicyError
+) -> Any:
+    allowed = ", ".join(member.value for member in enum_type)
+    if isinstance(value, enum_type):
+        return value
+    
+    if value is None or value == "":
+        raise error_cls(
+            f"{field_name} is required and must be one of: {allowed}.",
+            details={"field": field_name, "allowed": allowed}
+        )
+    
+    try:
+        return enum_type(str(value))
+    except ValueError as exc:
+        raise error_cls(
+            f"{field_name} must be one of: {allowed} (received {value!r}).",
+            details={
+                "field": field_name, 
+                "value": value, 
+                "allowed": allowed}
+        ) from exc
+
 def _max_impact(*impacts: PolicyImpact) -> PolicyImpact:
     order = {PolicyImpact.LOW: 0, PolicyImpact.MEDIUM: 1, PolicyImpact.HIGH: 2, PolicyImpact.CRITICAL: 3}
     normalized = [_coerce_enum(impact, PolicyImpact, PolicyImpact.LOW) for impact in impacts if impact is not None]
@@ -974,6 +1057,8 @@ def _none_if_never(value: Any) -> Any:
 def _int_or_none(value: Any, *, field_name: str = "value") -> int | None:
     if value is None or str(value).strip().lower() in {"", "none", "never", "-1"}:
         return None
+    if isinstance(value, bool):
+        raise PolicyError(f"{field_name} must be an integer or a supported empty value, not boolean.", details={"field": field_name, "value": value})
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
