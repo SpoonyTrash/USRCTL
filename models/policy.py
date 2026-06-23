@@ -53,6 +53,8 @@ class PolicyOrigin(str, Enum):
     REPORT = "report"
     TEST = "test"
 
+STRICT_INPUT_ORIGINS = frozenset({PolicyOrigin.CLI, PolicyOrigin.TEMPLATE, PolicyOrigin.GLOBAL_CONFIG})
+
 class LoginRestrictionType(str, Enum):
     NON_INTERACTIVE_SHELL = "non_interactive_shell"
     ACCOUNT_LOCKED = "account_locked"
@@ -359,7 +361,16 @@ class InactivityPolicy(SecurityPolicy):
     ) -> None:
         super().__init__(name, PolicyType.INACTIVITY, status, target, origin, impact, description, warnings or [], dict(metadata or {}))
         self.inactive_days = _validate_optional_days(inactive_days, "inactive_days")
-        self.action = _coerce_enum(action, InactivityAction, InactivityAction.NONE)
+        if self.origin in STRICT_INPUT_ORIGINS:
+            self.action = _coerce_enum_strict(
+                action, 
+                InactivityAction,
+                field_name="action",
+                error_cls=InactivityPolicyError,
+            )
+        else:
+            self.action = _coerce_enum(action, InactivityAction, InactivityAction.NONE)
+
         self.disables_account = _coerce_bool(disables_account, field_name="disables_account", default=False)
         self.strict = _coerce_bool(strict, field_name="strict", default=False)
         if self.action in {InactivityAction.LOCK, InactivityAction.EXPIRE, InactivityAction.DISABLE} or self.disables_account:
@@ -427,14 +438,32 @@ class LoginRestrictionPolicy(SecurityPolicy):
         self.interactive_access_disabled = _coerce_bool(interactive_access_disabled, field_name="interactive_access_disabled", default=False)
         self.restriction_scope = _optional_str(restriction_scope)
         self.reason = _optional_str(reason)
-        self.restriction_type = _coerce_enum(restriction_type or self._infer_restriction_type(), LoginRestrictionType, LoginRestrictionType.UNKNOWN)
+        restriction_type_value = restriction_type or self._infer_restriction_type()
+        if self.origin in STRICT_INPUT_ORIGINS:
+            self.restriction_type = _coerce_enum_strict(
+                restriction_type_value,
+                LoginRestrictionType,
+                field_name="restriction_type",
+                error_cls=LoginRestrictionError
+            )
+        else:
+            self.restriction_type = _coerce_enum(
+                restriction_type_value,
+                LoginRestrictionType,
+                LoginRestrictionType.UNKNOWN
+            )
         self._validate_login_restriction()
         if self.blocks_login:
             self.impact = _max_impact(self.impact, PolicyImpact.CRITICAL)
 
     @property
     def blocks_login(self) -> bool:
-        return not self.login_allowed or self.account_locked or self.restriction_type == LoginRestrictionType.LOGIN_DENIED
+        return not (
+            self.login_allowed 
+            or self.account_locked 
+            or self.restriction_type == LoginRestrictionType.LOGIN_DENIED
+            or self.disables_interactive_login
+        )
 
     @property
     def disables_interactive_login(self) -> bool:
@@ -889,6 +918,17 @@ class PolicyDiff:
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if self.current is not None and not isinstance(self.current, UserSecurityPolicy):
+            raise PolicyError(
+                "current must be an instance of UserSecurityPolicy or None",
+                details={"field": "current", "type": type(self.current).__name__}
+            )
+        if not isinstance(self.desired, UserSecurityPolicy):
+            raise PolicyError(
+                "desired must be an instance of UserSecurityPolicy.",
+                details={"field": "current", "type": type(self.desired).__name__}
+            )
+
         if not self.changes:
             self.changes = self._calculate_changes()
         self.impact = _max_impact(self.impact, self.desired.impact)
