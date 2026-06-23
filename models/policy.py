@@ -458,8 +458,8 @@ class LoginRestrictionPolicy(SecurityPolicy):
 
     @property
     def blocks_login(self) -> bool:
-        return not (
-            self.login_allowed 
+        return (
+            not self.login_allowed 
             or self.account_locked 
             or self.restriction_type == LoginRestrictionType.LOGIN_DENIED
             or self.disables_interactive_login
@@ -926,7 +926,7 @@ class PolicyDiff:
         if not isinstance(self.desired, UserSecurityPolicy):
             raise PolicyError(
                 "desired must be an instance of UserSecurityPolicy.",
-                details={"field": "current", "type": type(self.desired).__name__}
+                details={"field": "desired", "type": type(self.desired).__name__}
             )
 
         if not self.changes:
@@ -1153,6 +1153,7 @@ __all__ = [
     "PolicyStatus",
     "PolicyImpact",
     "PolicyOrigin",
+    "STRICT_INPUT_ORIGINS"
     "LoginRestrictionType",
     "ExpirationState",
     "InactivityAction",
