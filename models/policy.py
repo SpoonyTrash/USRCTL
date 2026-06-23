@@ -1153,7 +1153,7 @@ __all__ = [
     "PolicyStatus",
     "PolicyImpact",
     "PolicyOrigin",
-    "STRICT_INPUT_ORIGINS"
+    "STRICT_INPUT_ORIGINS",
     "LoginRestrictionType",
     "ExpirationState",
     "InactivityAction",
