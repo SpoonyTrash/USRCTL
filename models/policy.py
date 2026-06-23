@@ -95,7 +95,7 @@ class SecurityPolicy:
         self.origin = _coerce_enum(self.origin, PolicyOrigin, PolicyOrigin.SYSTEM)
         self.impact = _coerce_enum(self.impact, PolicyImpact, PolicyImpact.LOW)
         self.warnings = [str(item) for item in self.warnings]
-        self.metadata = dict(self.metadata or {})
+        self.metadata = _safe_metadata(self.metadata)
         if not str(self.name).strip():
             raise PolicyError("Policy name cannot be empty.", details={"field": "name"})
         self.name = str(self.name).strip()
@@ -452,7 +452,31 @@ class LoginRestrictionPolicy(SecurityPolicy):
     
     def _validate_login_restriction(self) -> None:
         if self.restriction_type == LoginRestrictionType.LOGIN_ALLOWED and not self.login_allowed:
-            raise LoginRestrictionError("login_allowed cannot be false for a login_allowed restriction.")
+            raise LoginRestrictionError(
+                "login_allowed cannot be false for a login_allowed restriction.",
+                details={"restriction_type": self.restriction_type.value, "login_allowed": self.login_allowed})
+        if self.restriction_type == LoginRestrictionType.ACCOUNT_LOCKED and not self.account_locked:
+            raise LoginRestrictionError(
+                "account_locked must be true for an account_locked restriction.",
+                details={"restriction_type": self.restriction_type.value, "account_locked": self.account_locked}
+            )
+        if self.restriction_type == LoginRestrictionType.LOGIN_DENIED and self.login_allowed:
+            raise LoginRestrictionError(
+                "login_allowed must be false for a login_denied restriction.",
+                details={"restriction_type": self.restriction_type.value, "login_allowed": self.login_allowed}
+            )
+        if (
+            self.restriction_type == LoginRestrictionType.NON_INTERACTIVE_SHELL
+            and not self.disables_interactive_login
+        ):
+            raise LoginRestrictionError(
+                "non_interactive_shell restrictions must disable interactive login.",
+                details={
+                    "restriction_type": self.restriction_type.value,
+                    "restricted_shell": self.restricted_shell,
+                    "interactive_access_disabled": self.interactive_access_disabled
+                }
+            )
         
     def to_dict(self) -> dict[str, Any]:
         data = super().to_dict()
@@ -740,10 +764,14 @@ class PolicyApplySpec:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        #SIGO AQUI
         self.username = validate_username(self.username, allow_reserved=True)
         if not isinstance(self.policy, UserSecurityPolicy):
             raise PolicyError("policy must be an instance of UserSecurityPolicy.", details={"field": "policy", "type": type(self.policy).__name__})
+        if self.username != self.policy.username:
+            raise PolicyError(
+                "PolicyApplySpec username must match policy username.",
+                details={"username": self.username, "policy_username": self.policy.username}
+            )
         self.dry_run = _coerce_bool(self.dry_run, field_name="dry_run", default=True)
         self.estimated_impact = _max_impact(_coerce_enum(self.estimated_impact, PolicyImpact, PolicyImpact.LOW), self.policy.impact)
         self.metadata = _safe_metadata(self.metadata)
@@ -1058,7 +1086,7 @@ def _int_or_none(value: Any, *, field_name: str = "value") -> int | None:
     if value is None or str(value).strip().lower() in {"", "none", "never", "-1"}:
         return None
     if isinstance(value, bool):
-        raise PolicyError(f"{field_name} must be an integer or a supported empty value, not boolean.", details={"field": field_name, "value": value})
+        raise PolicyError(f"{field_name} must be an integer, not boolean.", details={"field": field_name, "value": value})
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
@@ -1101,4 +1129,3 @@ __all__ = [
 
 ]
 
-#
