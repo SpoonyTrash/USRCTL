@@ -144,7 +144,7 @@ class BackupResource:
     checksum: str | None = None
     is_sensitive: bool = False
     status: BackupStatus = BackupStatus.UNKNOWN
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         self.original_path = _clean_required_text(self.original_path, "original_path")
@@ -313,16 +313,16 @@ class Backup:
         self.version = _clean_optional_text(self.version)
         self.pre_operation = _clean_optional_text(self.pre_operation)
         self.created_at = _coerce_datetime(self.created_at)
-        self.resources = _dedupe_resources(self.resources)
-        self.included_system_files = _coerce_text_list(
+        self.resources = _coerce_resource_list(self.resources)
+        self.included_system_files = _coerce_path_list(
             self.included_system_files,
             "included_system_files",
         )
-        self.omitted_resources = _coerce_text_list(
+        self.omitted_resources = _coerce_path_list(
             self.omitted_resources,
             "omitted_resources",
         )
-        self.failed_resources = _coerce_text_list(
+        self.failed_resources = _coerce_path_list(
             self.failed_resources,
             "failed_resources",
         )
@@ -400,9 +400,7 @@ class Backup:
 
     @classmethod
     def from_metadata(cls, data: Mapping[str, Any]) -> "Backup":
-        resources = [
-            BackupResource.from_dict(item) for item in data.get("resources", [])
-        ]
+        resources = _coerce_resource_list(data.get("resources"))
         return cls(
             backup_id=str(data.get("backup_id") or data.get("id") or ""),
             name=str(data.get("name") or data.get("backup_id") or ""),
@@ -415,7 +413,7 @@ class Backup:
             version=data.get("version"),
             integrity=data.get("integrity", IntegrityStatus.UNKNOWN),
             metadata=dict(data.get("metadata") or {}),
-            included_system_files=_coerce_text_list(
+            included_system_files=_coerce_path_list(
                 data.get("included_system_files"),
                 "included_system_files",
             ),            
@@ -425,11 +423,11 @@ class Backup:
                 default=False,
             ),
             pre_operation=data.get("pre_operation"),
-            omitted_resources=_coerce_text_list(
+            omitted_resources=_coerce_path_list(
                 data.get("omitted_resources"),
                 "omitted_resources",
             ),
-            failed_resources=_coerce_text_list(
+            failed_resources=_coerce_path_list(
                 data.get("failed_resources"),
                 "failed_resources",
             ),
@@ -565,7 +563,7 @@ class BackupCreateSpec:
             default=True,
         )
         self.backup_format = _validate_backup_format(self.backup_format)
-        self.additional_resources = _coerce_text_list(
+        self.additional_resources = _coerce_path_list(
             self.additional_resources,
             "additional_resources",
         )
@@ -616,25 +614,37 @@ class BackupCreateSpec:
 
     @classmethod
     def from_cli_params(cls, **params: Any) -> "BackupCreateSpec":
+        backup_type = _coerce_enum(
+            params.get("backup_type", params.get("type", BackupType.PARTIAL)),
+            BackupType,
+            BackupType.PARTIAL,
+        )
+        include_system_files = _coerce_bool(
+            params.get("include_system", params.get("include_system_files", False)),
+            field_name="include_system_files",
+            default=False,
+        )
+        include_home = _coerce_bool(
+            params.get("include_home", False),
+            field_name="include_home",
+            default=False,
+        )
+        additional_resources = _coerce_path_list(
+            params.get("resources") or params.get("additional_resources"),
+            "additional_resources",
+        )
+        if not include_system_files and not include_home and not additional_resources:
+            if backup_type == BackupType.USER:
+                include_system_files = True
+            elif backup_type == BackupType.HOME:
+                include_home = True
+
         return cls(
-            backup_type=params.get(
-                "backup_type", params.get("type", BackupType.PARTIAL)
-            ),
+            backup_type=backup_type,
             target_user=params.get("user") or params.get("target_user"),
-            include_system_files=_coerce_bool(
-                params.get("include_system", params.get("include_system_files", False)),
-                field_name="include_system_files",
-                default=False,
-            ),
-            include_home=_coerce_bool(
-                params.get("include_home", False),
-                field_name="include_home",
-                default=False,
-            ),
-            additional_resources=_coerce_text_list(
-                params.get("resources") or params.get("additional_resources"),
-                "additional_resources",
-            ),
+            include_system_files=include_system_files,
+            include_home=include_home,
+            additional_resources=additional_resources,
             destination=params.get("destination"),
             reason=params.get("reason"),
             dry_run=_coerce_bool(
@@ -675,7 +685,7 @@ class BackupCreateSpec:
                 field_name="include_home",
                 default=target_user is not None,
             ),
-            additional_resources=_coerce_text_list(
+            additional_resources=_coerce_path_list(
                 options.get("additional_resources"),
                 "additional_resources",
             ),            
@@ -730,12 +740,12 @@ class RestorePlan:
         self.restore_type = _coerce_enum(
             self.restore_type, RestoreType, RestoreType.PARTIAL
         )
-        self.resources_to_restore = _dedupe_resources(self.resources_to_restore)
-        self.resources_to_overwrite = _coerce_text_list(
+        self.resources_to_restore = _coerce_resource_list(self.resources_to_restore)
+        self.resources_to_overwrite = _coerce_path_list(
             self.resources_to_overwrite,
             "resources_to_overwrite",
         )
-        self.resources_to_omit = _coerce_text_list(
+        self.resources_to_omit = _coerce_path_list(
             self.resources_to_omit,
             "resources_to_omit",
         )
@@ -830,10 +840,17 @@ class RestorePlan:
         *,
         restore_type: RestoreType = RestoreType.PARTIAL,
         dry_run: bool = False,
+        version: str | None = None,
     ) -> "RestorePlan":
+        restore_version = _clean_optional_text(version) or backup.version
+        if restore_version is None and not dry_run:
+            raise ValidationError(
+                "Cannot create a non-simulated restore plan from a backup without version."
+            )
+        
         return cls(
             backup_id=backup.backup_id,
-            version=backup.version,
+            version=restore_version,
             restore_type=restore_type,
             resources_to_restore=list(backup.resources),
             resources_to_overwrite=[
@@ -865,15 +882,15 @@ class RestoreSummary:
         self.final_status = _coerce_enum(
             self.final_status, RestoreStatus, RestoreStatus.UNKNOWN
         )
-        self.restored_resources = _coerce_text_list(
+        self.restored_resources = _coerce_path_list(
             self.restored_resources,
             "restored_resources",
         )
-        self.failed_resources = _coerce_text_list(
+        self.failed_resources = _coerce_path_list(
             self.failed_resources,
             "failed_resources",
         )
-        self.omitted_resources = _coerce_text_list(
+        self.omitted_resources = _coerce_path_list(
             self.omitted_resources,
             "omitted_resources",
         )
@@ -1103,6 +1120,30 @@ def _coerce_text_list(value: Any, field_name: str) -> list[str]:
         return _dedupe_texts(value)
     raise ValidationError(f"{field_name} must be a string or sequence of strings.")
 
+def _dedupe_paths(values: Sequence[Any], field_name: str) -> list[str]:
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            raise ValidationError(
+                f"{field_name} must be a string or sequence of strings."
+            )
+        path = _clean_optional_path(item, field_name)
+        if path and path not in seen:
+            seen.add(path)
+            cleaned.append(path)
+    return cleaned
+
+
+def _coerce_path_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        path = _clean_optional_path(value, field_name)
+        return [path] if path else []
+    if isinstance(value, Sequence):
+        return _dedupe_paths(value, field_name)
+    raise ValidationError(f"{field_name} must be a string or sequence of strings.")
 
 def _dedupe_resources(
     resources: Sequence[BackupResource | Mapping[str, Any]],
@@ -1118,6 +1159,19 @@ def _dedupe_resources(
             seen.add(key)
             result.append(resource)
     return result
+
+def _coerce_resource_list(value: Any) -> list[BackupResource]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise ValidationError("resources must be a sequence of resource objects.")
+    if not isinstance(value, Sequence):
+        raise ValidationError("resources must be a sequence of resource objects.")
+    for item in value:
+        if not isinstance(item, (BackupResource, Mapping)):
+            raise ValidationError("resources must be a sequence of resource objects.")
+    return _dedupe_resources(value)
+
 
 
 def _is_sensitive_path(path: str | None) -> bool:
