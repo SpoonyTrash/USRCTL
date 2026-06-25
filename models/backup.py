@@ -5,6 +5,7 @@ from pathlib import PurePath
 from typing import Any, Mapping, Sequence
 
 from utils.errors import ValidationError
+from utils.validators import validate_username
 
 CONFIGURED_BACKUP_BASE_DIR_KEY = "backup_base_dir"
 
@@ -17,7 +18,7 @@ ALLOWED_BACKUP_FORMATS = frozenset(
         BACKUP_FORMAT_DIRECTORY,
         BACKUP_FORMAT_COMPRESSED,
         BACKUP_FORMAT_TAR,
-        BACKUP_FORMAT_TAR_GZ
+        BACKUP_FORMAT_TAR_GZ,
     }
 )
 
@@ -30,7 +31,7 @@ BACKUP_NAME_PREFIXES = frozenset(
         BACKUP_NAME_PREFIX_SYSTEM,
         BACKUP_NAME_PREFIX_USER,
         BACKUP_NAME_PREFIX_HOME,
-        BACKUP_NAME_PREFIX_RESTORE_POINT
+        BACKUP_NAME_PREFIX_RESTORE_POINT,
     }
 )
 
@@ -46,7 +47,7 @@ CRITICAL_SYSTEM_FILES = frozenset(
 
 DEFAULT_BACKUP_BASE_DIR = "/var/backups/adminusersrat"
 
-SENSITIVE_BACKUP_RESOURCES =frozenset(
+SENSITIVE_BACKUP_RESOURCES = frozenset(
     {
         "/etc/passwd",
         "/etc/shadow",
@@ -56,7 +57,8 @@ SENSITIVE_BACKUP_RESOURCES =frozenset(
         "/etc/security/access.conf",
         "/etc/login.defs",
     }
-    )
+)
+
 
 class BackupType(str, Enum):
     FULL = "full"
@@ -65,6 +67,7 @@ class BackupType(str, Enum):
     HOME = "home"
     CRITICAL_FILES = "critical_files"
     DRY_RUN = "dry_run"
+
 
 class BackupStatus(str, Enum):
     PENDING = "pending"
@@ -78,6 +81,7 @@ class BackupStatus(str, Enum):
     UNKNOWN = "unknown"
     SKIPPED = "skipped"
 
+
 class BackupResourceType(str, Enum):
     SYSTEM_FILE = "system_file"
     HOME_DIRECTORY = "home_directory"
@@ -86,6 +90,7 @@ class BackupResourceType(str, Enum):
     MANIFEST = "manifest"
     UNKNOWN = "unknown"
 
+
 class IntegrityStatus(str, Enum):
     NOT_VERIFIED = "not_verified"
     VERIFIED = "verified"
@@ -93,13 +98,15 @@ class IntegrityStatus(str, Enum):
     PARTIAL = "partial"
     UNKNOWN = "unknown"
 
+
 class RestoreType(str, Enum):
     FULL = "full"
     PARTIAL = "partial"
     USER = "user"
     HOME = "home"
     CRITICAL_FILES = "critical_files"
-    DRY_RUN = "dry_run" 
+    DRY_RUN = "dry_run"
+
 
 class BackupOrigin(str, Enum):
     MANUAL = "manual"
@@ -111,6 +118,7 @@ class BackupOrigin(str, Enum):
     TEST = "test"
     UNKNOWN = "unknown"
 
+
 class RestoreStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
@@ -119,11 +127,13 @@ class RestoreStatus(str, Enum):
     SIMULATED = "simulated"
     UNKNOWN = "unknown"
 
+
 class RestoreImpact(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
 
 @dataclass(slots=True)
 class BackupResource:
@@ -140,27 +150,31 @@ class BackupResource:
         self.original_path = _clean_required_text(self.original_path, "original_path")
         self.backup_path = _clean_optional_text(self.backup_path)
         self.resource_type = _coerce_enum(
-            self.resource_type,
-            BackupResourceType,
-            BackupResourceType.UNKNOWN
+            self.resource_type, BackupResourceType, BackupResourceType.UNKNOWN
         )
-        self.status = _coerce_enum(
-            self.status,
-            BackupStatus,
-            BackupStatus.UNKNOWN
+        self.status = _coerce_enum(self.status, BackupStatus, BackupStatus.UNKNOWN)
+        self.size_bytes = _validate_optional_non_negative_int(
+            self.size_bytes, "size_bytes"
         )
-        self.size_bytes = _validate_optional_non_negative_int(self.size_bytes, "size_bytes")
-        self.is_sensitive = _is_sensitive_path(self.is_sensitive or _is_sensitive_path(self.original_path))
+        self.is_sensitive = _coerce_bool(
+            self.is_sensitive,
+            field_name="is_sensitive",
+            default=False,
+        ) or _is_sensitive_path(self.original_path)
         self.metadata = _safe_metadata(self.metadata)
 
     @property
     def is_verified(self) -> bool:
-        return self.status == BackupStatus.VERIFIED or bool(self.checksum)
+        return self.status == BackupStatus.VERIFIED
+
+    @property
+    def has_checksum(self) -> bool:
+        return bool(self.checksum)
 
     @property
     def has_failed(self) -> bool:
         return self.status in {BackupStatus.FAILED, BackupStatus.CORRUPT}
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "original_path": self.original_path,
@@ -170,9 +184,9 @@ class BackupResource:
             "checksum": self.checksum,
             "is_sensitive": self.is_sensitive,
             "status": self.status.value,
-            "metadata": self.metadata
+            "metadata": self.metadata,
         }
-    
+
     def to_audit_dict(self) -> dict[str, Any]:
         return {
             "original_path": self.original_path,
@@ -184,7 +198,7 @@ class BackupResource:
             "status": self.status.value,
             "has_checksum": bool(self.checksum),
         }
-    
+
     def to_summary_dict(self) -> dict[str, Any]:
         return {
             "path": self.original_path,
@@ -192,7 +206,7 @@ class BackupResource:
             "sensitive": self.is_sensitive,
             "status": self.status.value,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "BackupResource":
         return cls(
@@ -201,11 +215,16 @@ class BackupResource:
             resource_type=data.get("resource_type", BackupResourceType.UNKNOWN),
             size_bytes=data.get("size_bytes"),
             checksum=data.get("checksum"),
-            is_sensitive=bool(data.get("is_sensitive", False)),
+            is_sensitive=_coerce_bool(
+                data.get("is_sensitive", False),
+                field_name="is_sensitive",
+                default=False,
+            ),
             status=data.get("status", BackupStatus.UNKNOWN),
-            metadata=data.get("metadata" or {})
+            metadata=data.get("metadata" or {}),
         )
-    
+
+
 @dataclass(slots=True)
 class Backup:
     backup_id: str
@@ -213,7 +232,7 @@ class Backup:
     backup_type: BackupType
     status: BackupStatus
     path: str
-    created_at: datetime = field(default_factory= lambda: _utc_now())
+    created_at: datetime = field(default_factory=lambda: _utc_now())
     resources: list[BackupResource] = field(default_factory=list)
     target_user: str | None = None
     version: str | None = None
@@ -233,57 +252,64 @@ class Backup:
     @property
     def is_full_backup(self) -> bool:
         has_critical = CRITICAL_SYSTEM_FILES.issubset(set(self.included_system_files))
-        return self.backup_type == BackupType.FULL or (has_critical and self.includes_home)
-    
+        return self.backup_type == BackupType.FULL or (
+            has_critical and self.includes_home
+        )
+
     @property
     def is_partial_backup(self) -> bool:
-        return self.backup_type == BackupType.PARTIAL or self.status == BackupStatus.PARTIAL or bool(self.omitted_resources or self.failed_resources)
-    
+        return (
+            self.backup_type == BackupType.PARTIAL
+            or self.status == BackupStatus.PARTIAL
+            or bool(self.omitted_resources or self.failed_resources)
+        )
+
     @property
     def is_verified(self) -> bool:
-        return self.integrity == IntegrityStatus.VERIFIED or self.status == BackupStatus.VERIFIED
-    
+        return (
+            self.integrity == IntegrityStatus.VERIFIED
+            or self.status == BackupStatus.VERIFIED
+        )
+
     @property
     def is_corrupt(self) -> bool:
-        return self.integrity == IntegrityStatus.FAILED or self.status == BackupStatus.CORRUPT
-    
+        return (
+            self.integrity == IntegrityStatus.FAILED
+            or self.status == BackupStatus.CORRUPT
+        )
+
     @property
     def contains_sensitive_resources(self) -> bool:
-        return any(resource.is_sensitive for resource in self.resources) or any(_is_sensitive_path(path) for path in self.included_system_files)
+        return any(resource.is_sensitive for resource in self.resources) or any(
+            _is_sensitive_path(path) for path in self.included_system_files
+        )
 
     @property
     def has_warnings(self) -> bool:
         return bool(self.warnings)
-    
+
     @property
     def is_safe_for_automatic_restore(self) -> bool:
-        return self.is_verified and not self.is_corrupt and not self.contains_sensitive_resources and not self.is_partial_backup
+        return (
+            self.is_verified
+            and not self.is_corrupt
+            and not self.contains_sensitive_resources
+            and not self.is_partial_backup
+        )
 
     def _normalize_and_validate(self) -> None:
         self.backup_id = _clean_required_text(self.backup_id, "backup_id")
         self.name = _clean_required_text(self.name, "name")
         self.path = _validate_representable_path(self.path, "path")
         self.backup_type = _coerce_enum(
-            self.backup_type,
-            BackupType,
-            BackupType.PARTIAL
+            self.backup_type, BackupType, BackupType.PARTIAL
         )
-        self.status = _coerce_enum(
-            self.status,
-            BackupStatus,
-            BackupStatus.UNKNOWN
-        )
+        self.status = _coerce_enum(self.status, BackupStatus, BackupStatus.UNKNOWN)
         self.integrity = _coerce_enum(
-            self.integrity,
-            IntegrityStatus,
-            IntegrityStatus.UNKNOWN
+            self.integrity, IntegrityStatus, IntegrityStatus.UNKNOWN
         )
-        self.origin = _coerce_enum(
-            self.origin,
-            BackupOrigin,
-            BackupOrigin.UNKNOWN
-        )
-        self.target_user = _clean_optional_text(self.target_user)
+        self.origin = _coerce_enum(self.origin, BackupOrigin, BackupOrigin.UNKNOWN)
+        self.target_user = _clean_optional_username(self.target_user)
         self.version = _clean_optional_text(self.version)
         self.pre_operation = _clean_optional_text(self.pre_operation)
         self.created_at = _coerce_datetime(self.created_at)
@@ -292,6 +318,11 @@ class Backup:
         self.omitted_resources = _dedupe_texts(self.omitted_resources)
         self.failed_resources = _dedupe_texts(self.failed_resources)
         self.warnings = _dedupe_texts(self.warnings)
+        self.includes_home = _coerce_bool(
+            self.includes_home,
+            field_name="includes_home",
+            default=False,
+        )
         self.metadata = _safe_metadata(self.metadata)
 
     def to_dict(self) -> dict[str, Any]:
@@ -315,7 +346,7 @@ class Backup:
             "origin": self.origin.value,
             "metadata": dict(self.metadata),
         }
-    
+
     def to_audit_dict(self) -> dict[str, Any]:
         return {
             "backup_id": self.backup_id,
@@ -357,10 +388,12 @@ class Backup:
             "contains_sensitive_resources": self.contains_sensitive_resources,
             "has_warnings": self.has_warnings,
         }
-    
+
     @classmethod
     def from_metadata(cls, data: Mapping[str, Any]) -> "Backup":
-        resources = [BackupResource.from_dict(item) for item in data.get("resources", [])]
+        resources = [
+            BackupResource.from_dict(item) for item in data.get("resources", [])
+        ]
         return cls(
             backup_id=str(data.get("backup_id") or data.get("id") or ""),
             name=str(data.get("name") or data.get("backup_id") or ""),
@@ -374,7 +407,11 @@ class Backup:
             integrity=data.get("integrity", IntegrityStatus.UNKNOWN),
             metadata=dict(data.get("metadata") or {}),
             included_system_files=list(data.get("included_system_files") or []),
-            includes_home=bool(data.get("includes_home", False)),
+            includes_home=_coerce_bool(
+                data.get("includes_home", False),
+                field_name="includes_home",
+                default=False,
+            ),
             pre_operation=data.get("pre_operation"),
             omitted_resources=list(data.get("omitted_resources") or []),
             failed_resources=list(data.get("failed_resources") or []),
@@ -384,22 +421,29 @@ class Backup:
 
     @classmethod
     def from_detected_listing(cls, entry: Mapping[str, Any]) -> "Backup":
-        return cls.from_metadata({**entry, "status": entry.get("status", BackupStatus.UNKNOWN)})
+        return cls.from_metadata(
+            {**entry, "status": entry.get("status", BackupStatus.UNKNOWN)}
+        )
 
     @classmethod
     def from_operation_result(cls, result_data: Mapping[str, Any]) -> "Backup":
         metadata = dict(result_data.get("metadata") or result_data)
-        status = BackupStatus.CREATED if result_data.get("success") is True else BackupStatus.FAILED
+        status = (
+            BackupStatus.CREATED
+            if result_data.get("success") is True
+            else BackupStatus.FAILED
+        )
         if result_data.get("partial"):
             status = BackupStatus.PARTIAL
         return cls.from_metadata({**metadata, "status": metadata.get("status", status)})
-    
+
     @classmethod
     def from_partial_data(cls, **data: Any) -> "Backup":
         data.setdefault("backup_type", BackupType.PARTIAL)
         data.setdefault("status", BackupStatus.UNKNOWN)
         data.setdefault("integrity", IntegrityStatus.UNKNOWN)
         return cls.from_metadata(data)
+
 
 @dataclass(slots=True)
 class BackupVersion:
@@ -410,7 +454,7 @@ class BackupVersion:
     path: str | None = None
     integrity: IntegrityStatus = IntegrityStatus.NOT_VERIFIED
     reason: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)    
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.version_id = _clean_required_text(self.version_id, "version_id")
@@ -418,7 +462,9 @@ class BackupVersion:
         self.backup_id = _clean_required_text(self.backup_id, "backup_id")
         self.path = _clean_optional_path(self.path, "path")
         self.created_at = _coerce_datetime(self.created_at)
-        self.integrity = _coerce_enum(self.integrity, IntegrityStatus, IntegrityStatus.UNKNOWN)
+        self.integrity = _coerce_enum(
+            self.integrity, IntegrityStatus, IntegrityStatus.UNKNOWN
+        )
         self.reason = _clean_optional_text(self.reason)
         self.metadata = _safe_metadata(self.metadata)
 
@@ -437,7 +483,7 @@ class BackupVersion:
             "reason": self.reason,
             "metadata": dict(self.metadata),
         }
-    
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "BackupVersion":
         return cls(
@@ -451,6 +497,7 @@ class BackupVersion:
             metadata=dict(data.get("metadata") or {}),
         )
 
+
 @dataclass(slots=True)
 class BackupCreateSpec:
     backup_type: BackupType
@@ -462,12 +509,36 @@ class BackupCreateSpec:
     reason: str | None = None
     dry_run: bool = False
     require_verification: bool = True
+    backup_format: str = BACKUP_FORMAT_TAR_GZ
     origin: BackupOrigin = BackupOrigin.MANUAL
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.backup_type = _coerce_enum(self.backup_type, BackupType, BackupType.PARTIAL)
-        self.target_user = _clean_optional_text(self.target_user)
+        self.backup_type = _coerce_enum(
+            self.backup_type, BackupType, BackupType.PARTIAL
+        )
+        self.target_user = _clean_optional_username(self.target_user)
+        self.include_system_files = _coerce_bool(
+            self.include_system_files,
+            field_name="include_system_files",
+            default=False,
+        )
+        self.include_home = _coerce_bool(
+            self.include_home,
+            field_name="include_home",
+            default=False,
+        )
+        self.dry_run = _coerce_bool(
+            self.dry_run,
+            field_name="dry_run",
+            default=False,
+        )
+        self.require_verification = _coerce_bool(
+            self.require_verification,
+            field_name="require_verification",
+            default=True,
+        )
+        self.backup_format = _validate_backup_format(self.backup_format)
         self.additional_resources = _dedupe_texts(self.additional_resources)
         self.destination = _clean_optional_path(self.destination, "destination")
         self.reason = _clean_optional_text(self.reason)
@@ -476,7 +547,11 @@ class BackupCreateSpec:
 
     @property
     def contains_sensitive_resources(self) -> bool:
-        return self.include_home or self.include_system_files or any(_is_sensitive_path(path) for path in self.additional_resources)
+        return (
+            self.include_home
+            or self.include_system_files
+            or any(_is_sensitive_path(path) for path in self.additional_resources)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -489,6 +564,7 @@ class BackupCreateSpec:
             "reason": self.reason,
             "dry_run": self.dry_run,
             "require_verification": self.require_verification,
+            "backup_format": self.backup_format,
             "origin": self.origin.value,
             "metadata": dict(self.metadata),
         }
@@ -496,21 +572,44 @@ class BackupCreateSpec:
     @classmethod
     def from_cli_params(cls, **params: Any) -> "BackupCreateSpec":
         return cls(
-            backup_type=params.get("backup_type", params.get("type", BackupType.PARTIAL)),
+            backup_type=params.get(
+                "backup_type", params.get("type", BackupType.PARTIAL)
+            ),
             target_user=params.get("user") or params.get("target_user"),
-            include_system_files=bool(params.get("include_system") or params.get("include_system_files", False)),
-            include_home=bool(params.get("include_home", False)),
-            additional_resources=list(params.get("resources") or params.get("additional_resources") or []),
+            include_system_files=_coerce_bool(
+                params.get("include_system", params.get("include_system_files", False)),
+                field_name="include_system_files",
+                default=False,
+            ),
+            include_home=_coerce_bool(
+                params.get("include_home", False),
+                field_name="include_home",
+                default=False,
+            ),
+            additional_resources=list(
+                params.get("resources") or params.get("additional_resources") or []
+            ),
             destination=params.get("destination"),
             reason=params.get("reason"),
-            dry_run=bool(params.get("dry_run", False)),
-            require_verification=bool(params.get("require_verification", True)),
+            dry_run=_coerce_bool(
+                params.get("dry_run", False),
+                field_name="dry_run",
+                default=False,
+            ),
+            require_verification=_coerce_bool(
+                params.get("require_verification", True),
+                field_name="require_verification",
+                default=True,
+            ),
+            backup_format=params.get("backup_format", BACKUP_FORMAT_TAR_GZ),
             origin=params.get("origin", BackupOrigin.MANUAL),
             metadata=dict(params.get("metadata") or {}),
         )
 
     @classmethod
-    def for_critical_operation(cls, operation: str, target_user: str | None = None, **options: Any) -> "BackupCreateSpec":
+    def for_critical_operation(
+        cls, operation: str, target_user: str | None = None, **options: Any
+    ) -> "BackupCreateSpec":
         origin_map = {
             "delete_user": BackupOrigin.USER_DELETE,
             "restore": BackupOrigin.PRE_RESTORE,
@@ -520,25 +619,48 @@ class BackupCreateSpec:
         return cls(
             backup_type=options.get("backup_type", BackupType.FULL),
             target_user=target_user,
-            include_system_files=bool(options.get("include_system_files", True)),
-            include_home=bool(options.get("include_home", target_user is not None)),
+            include_system_files=_coerce_bool(
+                options.get("include_system_files", True),
+                field_name="include_system_files",
+                default=True,
+            ),
+            include_home=_coerce_bool(
+                options.get("include_home", target_user is not None),
+                field_name="include_home",
+                default=target_user is not None,
+            ),
             additional_resources=list(options.get("additional_resources") or []),
             destination=options.get("destination"),
             reason=options.get("reason", f"before {operation}"),
-            dry_run=bool(options.get("dry_run", False)),
-            require_verification=bool(options.get("require_verification", True)),
+            dry_run=_coerce_bool(
+                options.get("dry_run", False),
+                field_name="dry_run",
+                default=False,
+            ),
+            require_verification=_coerce_bool(
+                options.get("require_verification", True),
+                field_name="require_verification",
+                default=True,
+            ),
+            backup_format=options.get("backup_format", BACKUP_FORMAT_TAR_GZ),
             origin=origin_map.get(operation, BackupOrigin.MAINTENANCE),
             metadata={"operation": operation, **dict(options.get("metadata") or {})},
         )
 
     @classmethod
     def from_template(cls, template_data: Mapping[str, Any]) -> "BackupCreateSpec":
-        return cls.from_cli_params(**dict(template_data), origin=template_data.get("origin", BackupOrigin.MAINTENANCE))
+        return cls.from_cli_params(
+            **dict(template_data),
+            origin=template_data.get("origin", BackupOrigin.MAINTENANCE),
+        )
 
     @classmethod
-    def from_config_defaults(cls, defaults: Mapping[str, Any], **overrides: Any) -> "BackupCreateSpec":
+    def from_config_defaults(
+        cls, defaults: Mapping[str, Any], **overrides: Any
+    ) -> "BackupCreateSpec":
         data = {**dict(defaults), **overrides}
         return cls.from_cli_params(**data)
+
 
 @dataclass(slots=True)
 class RestorePlan:
@@ -557,42 +679,70 @@ class RestorePlan:
     def __post_init__(self) -> None:
         self.backup_id = _clean_required_text(self.backup_id, "backup_id")
         self.version = _clean_optional_text(self.version)
-        self.restore_type = _coerce_enum(self.restore_type, RestoreType, RestoreType.PARTIAL)
+        self.restore_type = _coerce_enum(
+            self.restore_type, RestoreType, RestoreType.PARTIAL
+        )
         self.resources_to_restore = _dedupe_resources(self.resources_to_restore)
         self.resources_to_overwrite = _dedupe_texts(self.resources_to_overwrite)
         self.resources_to_omit = _dedupe_texts(self.resources_to_omit)
         self.impact = _coerce_enum(self.impact, RestoreImpact, RestoreImpact.HIGH)
         self.warnings = _dedupe_texts(self.warnings)
         self.metadata = _safe_metadata(self.metadata)
-        self.requires_confirmation = bool(self.requires_confirmation or self.requires_confirmation_for_restore)
+        self.dry_run = _coerce_bool(
+            self.dry_run,
+            field_name="dry_run",
+            default=False,
+        )
+        self.requires_confirmation = (
+            _coerce_bool(
+                self.requires_confirmation,
+                field_name="requires_confirmation",
+                default=True,
+            )
+            or self.requires_confirmation_for_restore
+        )
 
     @property
     def contains_sensitive_resources(self) -> bool:
-        paths = [resource.original_path for resource in self.resources_to_restore] + self.resources_to_overwrite
-        return any(_is_sensitive_path(path) for path in paths) or any(resource.is_sensitive for resource in self.resources_to_restore)
+        paths = [
+            resource.original_path for resource in self.resources_to_restore
+        ] + self.resources_to_overwrite
+        return any(_is_sensitive_path(path) for path in paths) or any(
+            resource.is_sensitive for resource in self.resources_to_restore
+        )
 
     @property
     def requires_confirmation_for_restore(self) -> bool:
-        return self.impact in {RestoreImpact.HIGH, RestoreImpact.CRITICAL} or self.contains_sensitive_resources or self.restore_type in {RestoreType.FULL, RestoreType.CRITICAL_FILES}
+        return (
+            self.impact in {RestoreImpact.HIGH, RestoreImpact.CRITICAL}
+            or self.contains_sensitive_resources
+            or self.restore_type in {RestoreType.FULL, RestoreType.CRITICAL_FILES}
+        )
 
     @property
     def has_warnings(self) -> bool:
         return bool(self.warnings)
-    
+
     @property
     def is_safe_for_automatic_restore(self) -> bool:
-        return self.dry_run or (not self.requires_confirmation_for_restore and not self.has_warnings)
+        return self.dry_run or (
+            not self.requires_confirmation_for_restore and not self.has_warnings
+        )
 
     def validate_versioned_restore(self) -> None:
         if self.restore_type != RestoreType.DRY_RUN and not self.version:
-            raise ValidationError("Restore plan requires a version for non-simulated restores.")
-        
+            raise ValidationError(
+                "Restore plan requires a version for non-simulated restores."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "backup_id": self.backup_id,
             "version": self.version,
             "restore_type": self.restore_type.value,
-            "resources_to_restore": [resource.to_dict() for resource in self.resources_to_restore],
+            "resources_to_restore": [
+                resource.to_dict() for resource in self.resources_to_restore
+            ],
             "resources_to_overwrite": list(self.resources_to_overwrite),
             "resources_to_omit": list(self.resources_to_omit),
             "impact": self.impact.value,
@@ -613,19 +763,30 @@ class RestorePlan:
             "impact": self.impact.value,
             "dry_run": self.dry_run,
         }
-    
+
     @classmethod
-    def from_backup(cls, backup: Backup, *, restore_type: RestoreType = RestoreType.PARTIAL, dry_run: bool = False) -> "RestorePlan":
+    def from_backup(
+        cls,
+        backup: Backup,
+        *,
+        restore_type: RestoreType = RestoreType.PARTIAL,
+        dry_run: bool = False,
+    ) -> "RestorePlan":
         return cls(
             backup_id=backup.backup_id,
             version=backup.version,
             restore_type=restore_type,
             resources_to_restore=list(backup.resources),
-            resources_to_overwrite=[resource.original_path for resource in backup.resources],
-            impact=RestoreImpact.CRITICAL if backup.contains_sensitive_resources else RestoreImpact.HIGH,
+            resources_to_overwrite=[
+                resource.original_path for resource in backup.resources
+            ],
+            impact=RestoreImpact.CRITICAL
+            if backup.contains_sensitive_resources
+            else RestoreImpact.HIGH,
             dry_run=dry_run,
             warnings=list(backup.warnings),
         )
+
 
 @dataclass(slots=True)
 class RestoreSummary:
@@ -642,11 +803,18 @@ class RestoreSummary:
     def __post_init__(self) -> None:
         self.backup_id = _clean_required_text(self.backup_id, "backup_id")
         self.version = _clean_optional_text(self.version)
-        self.final_status = _coerce_enum(self.final_status, RestoreStatus, RestoreStatus.UNKNOWN)
+        self.final_status = _coerce_enum(
+            self.final_status, RestoreStatus, RestoreStatus.UNKNOWN
+        )
         self.restored_resources = _dedupe_texts(self.restored_resources)
         self.failed_resources = _dedupe_texts(self.failed_resources)
         self.omitted_resources = _dedupe_texts(self.omitted_resources)
         self.warnings = _dedupe_texts(self.warnings)
+        self.changes_applied = _coerce_bool(
+            self.changes_applied,
+            field_name="changes_applied",
+            default=False,
+        )
         self.metadata = _safe_metadata(self.metadata)
 
     @property
@@ -679,26 +847,38 @@ class RestoreSummary:
             "failed_count": len(self.failed_resources),
             "omitted_count": len(self.omitted_resources),
             "changes_applied": self.changes_applied,
-            "contains_sensitive_resources": any(_is_sensitive_path(path) for path in self.restored_resources),
+            "contains_sensitive_resources": any(
+                _is_sensitive_path(path) for path in self.restored_resources
+            ),
         }
 
     def to_report_dict(self) -> dict[str, Any]:
         return self.to_dict()
 
     @classmethod
-    def from_restore_plan(cls, plan: RestorePlan, *, final_status: RestoreStatus, changes_applied: bool = False) -> "RestoreSummary":
+    def from_restore_plan(
+        cls,
+        plan: RestorePlan,
+        *,
+        final_status: RestoreStatus,
+        changes_applied: bool = False,
+    ) -> "RestoreSummary":
         return cls(
             backup_id=plan.backup_id,
             version=plan.version,
             final_status=final_status,
-            restored_resources=[] if plan.dry_run else [resource.original_path for resource in plan.resources_to_restore],
+            restored_resources=[]
+            if plan.dry_run
+            else [resource.original_path for resource in plan.resources_to_restore],
             omitted_resources=list(plan.resources_to_omit),
             warnings=list(plan.warnings),
             changes_applied=changes_applied and not plan.dry_run,
         )
 
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _clean_required_text(value: Any, field_name: str) -> str:
     if value is None:
@@ -708,11 +888,66 @@ def _clean_required_text(value: Any, field_name: str) -> str:
         raise ValidationError(f"{field_name} must not be empty.")
     return text
 
+
 def _clean_optional_text(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def _clean_optional_username(value: Any) -> str | None:
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    return validate_username(text, allow_reserved=True)
+
+
+def _coerce_bool(
+    value: Any,
+    *,
+    field_name: str,
+    default: bool | None = None,
+) -> bool:
+    if value is None:
+        if default is not None:
+            return default
+        raise ValidationError(
+            f"{field_name} must be a boolean-like value.",
+        )
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValidationError(
+            f"{field_name} must be a boolean-like value.",
+        )
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+        if normalized in {"false", "no", "n", "0"}:
+            return False
+        raise ValidationError(
+            f"{field_name} must be one of: true/false, yes/no, 1/0.",
+        )
+
+    raise ValidationError(
+        f"{field_name} must be a boolean-like value.",
+    )
+
+
+def _validate_backup_format(value: Any) -> str:
+    text = _clean_required_text(value, "backup_format")
+    if text not in ALLOWED_BACKUP_FORMATS:
+        allowed = ", ".join(sorted(ALLOWED_BACKUP_FORMATS))
+        raise ValidationError(f"backup_format must be one of: {allowed}.")
+    return text
+
 
 def _validate_representable_path(value: Any, field_name: str) -> str:
     text = _clean_required_text(value, field_name)
@@ -722,11 +957,13 @@ def _validate_representable_path(value: Any, field_name: str) -> str:
         raise ValidationError(f"{field_name} must be representable as a path.") from exc
     return text
 
+
 def _datetime_to_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _coerce_datetime(value).isoformat()
-    
+
+
 def _coerce_datetime(value: datetime | str) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -735,9 +972,12 @@ def _coerce_datetime(value: datetime | str) -> datetime:
         try:
             parsed = datetime.fromisoformat(text)
         except ValueError as exc:
-            raise ValidationError("datetime value must be ISO-8601 compatible.") from exc
+            raise ValidationError(
+                "datetime value must be ISO-8601 compatible."
+            ) from exc
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     raise ValidationError("datetime value must be a datetime or ISO string.")
+
 
 def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Any:
     if isinstance(value, enum_cls):
@@ -748,7 +988,10 @@ def _coerce_enum(value: Any, enum_cls: type[Enum], default: Enum) -> Any:
         return enum_cls(str(value))
     except ValueError as exc:
         allowed = ", ".join(item.value for item in enum_cls)
-        raise ValidationError(f"Invalid {enum_cls.__name__}: {value!r}. Allowed values: {allowed}.") from exc
+        raise ValidationError(
+            f"Invalid {enum_cls.__name__}: {value!r}. Allowed values: {allowed}."
+        ) from exc
+
 
 def _clean_optional_path(value: Any, field_name: str) -> str | None:
     text = _clean_optional_text(value)
@@ -756,12 +999,16 @@ def _clean_optional_path(value: Any, field_name: str) -> str | None:
         return None
     return _validate_representable_path(text, field_name)
 
+
 def _validate_optional_non_negative_int(value: Any, field_name: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValidationError(f"{field_name} must be a non-negative integer when provided.")
+        raise ValidationError(
+            f"{field_name} must be a non-negative integer when provided."
+        )
     return value
+
 
 def _dedupe_texts(values: Sequence[Any]) -> list[str]:
     seen: set[str] = set()
@@ -773,35 +1020,88 @@ def _dedupe_texts(values: Sequence[Any]) -> list[str]:
             cleaned.append(text)
     return cleaned
 
-def _dedupe_resources(resources: Sequence[BackupResource | Mapping[str, Any]]) -> list[BackupResource]:
-    seen: str[tuple[str, str | None]] = set()
+
+def _dedupe_resources(
+    resources: Sequence[BackupResource | Mapping[str, Any]],
+) -> list[BackupResource]:
+    seen: set[tuple[str, str | None]] = set()
     result: list[BackupResource] = []
     for item in resources:
-        resource = item if isinstance(item, BackupResource) else BackupResource.from_dict(item)
+        resource = (
+            item if isinstance(item, BackupResource) else BackupResource.from_dict(item)
+        )
         key = (resource.original_path, resource.backup_path)
         if key not in seen:
             seen.add(key)
             result.append(resource)
     return result
 
-def _is_sensitive_path(path: str | None) -> bool:
-    if not path:
-        return False
-    normalized = str(PurePath(str(path)))
-    return normalized in SENSITIVE_BACKUP_RESOURCES or normalized in CRITICAL_SYSTEM_FILES or normalized.startswith("/home/")
 
 def _is_sensitive_path(path: str | None) -> bool:
     if not path:
         return False
     normalized = str(PurePath(str(path)))
-    return normalized in SENSITIVE_BACKUP_RESOURCES or normalized in CRITICAL_SYSTEM_FILES or normalized.startswith("/home/")
+    return (
+        normalized in SENSITIVE_BACKUP_RESOURCES
+        or normalized in CRITICAL_SYSTEM_FILES
+        or normalized.startswith("/home/")
+    )
+
+
+SENSITIVE_METADATA_KEYS = frozenset(
+    {
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "hash",
+        "shadow",
+        "credential",
+        "credentials",
+    }
+)
+
+
+def _looks_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in SENSITIVE_METADATA_KEYS)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return _datetime_to_iso(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+            if not _looks_sensitive_key(str(key))
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    return value
+
 
 def _safe_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     if metadata is None:
         return {}
     if not isinstance(metadata, Mapping):
         raise ValidationError("metadata must be a mapping.")
-    return dict(metadata)
+
+    safe: dict[str, Any] = {}
+    for key, value in metadata.items():
+        normalized_key = str(key).strip()
+        if not normalized_key:
+            raise ValidationError("metadata keys cannot be empty.")
+        if _looks_sensitive_key(normalized_key):
+            continue
+        safe[normalized_key] = _json_safe(value)
+    return safe
+
 
 __all__ = [
     "ALLOWED_BACKUP_FORMATS",
@@ -821,6 +1121,7 @@ __all__ = [
     "IntegrityStatus",
     "RestorePlan",
     "RestoreSummary",
-    "RestoreType"
+    "RestoreStatus",
+    "RestoreImpact",
+    "RestoreType",
 ]
-
