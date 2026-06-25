@@ -314,10 +314,19 @@ class Backup:
         self.pre_operation = _clean_optional_text(self.pre_operation)
         self.created_at = _coerce_datetime(self.created_at)
         self.resources = _dedupe_resources(self.resources)
-        self.included_system_files = _dedupe_texts(self.included_system_files)
-        self.omitted_resources = _dedupe_texts(self.omitted_resources)
-        self.failed_resources = _dedupe_texts(self.failed_resources)
-        self.warnings = _dedupe_texts(self.warnings)
+        self.included_system_files = _coerce_text_list(
+            self.included_system_files,
+            "included_system_files",
+        )
+        self.omitted_resources = _coerce_text_list(
+            self.omitted_resources,
+            "omitted_resources",
+        )
+        self.failed_resources = _coerce_text_list(
+            self.failed_resources,
+            "failed_resources",
+        )
+        self.warnings = _coerce_text_list(self.warnings, "warnings")
         self.includes_home = _coerce_bool(
             self.includes_home,
             field_name="includes_home",
@@ -406,16 +415,25 @@ class Backup:
             version=data.get("version"),
             integrity=data.get("integrity", IntegrityStatus.UNKNOWN),
             metadata=dict(data.get("metadata") or {}),
-            included_system_files=list(data.get("included_system_files") or []),
+            included_system_files=_coerce_text_list(
+                data.get("included_system_files"),
+                "included_system_files",
+            ),            
             includes_home=_coerce_bool(
                 data.get("includes_home", False),
                 field_name="includes_home",
                 default=False,
             ),
             pre_operation=data.get("pre_operation"),
-            omitted_resources=list(data.get("omitted_resources") or []),
-            failed_resources=list(data.get("failed_resources") or []),
-            warnings=list(data.get("warnings") or []),
+            omitted_resources=_coerce_text_list(
+                data.get("omitted_resources"),
+                "omitted_resources",
+            ),
+            failed_resources=_coerce_text_list(
+                data.get("failed_resources"),
+                "failed_resources",
+            ),
+            warnings=_coerce_text_list(data.get("warnings"), "warnings"),
             origin=data.get("origin", BackupOrigin.UNKNOWN),
         )
 
@@ -547,11 +565,30 @@ class BackupCreateSpec:
             default=True,
         )
         self.backup_format = _validate_backup_format(self.backup_format)
-        self.additional_resources = _dedupe_texts(self.additional_resources)
+        self.additional_resources = _coerce_text_list(
+            self.additional_resources,
+            "additional_resources",
+        )
         self.destination = _clean_optional_path(self.destination, "destination")
         self.reason = _clean_optional_text(self.reason)
         self.origin = _coerce_enum(self.origin, BackupOrigin, BackupOrigin.UNKNOWN)
         self.metadata = _safe_metadata(self.metadata)
+        if (
+            self.backup_type in {BackupType.USER, BackupType.HOME}
+            and not self.target_user
+        ):
+            raise ValidationError(
+                "target_user is required for user and home backups."
+            )
+        if (
+            self.backup_type != BackupType.DRY_RUN
+            and not self.include_system_files
+            and not self.include_home
+            and not self.additional_resources
+        ):
+            raise ValidationError(
+                "BackupCreateSpec requires at least one resource to back up."
+            )
 
     @property
     def contains_sensitive_resources(self) -> bool:
@@ -638,7 +675,10 @@ class BackupCreateSpec:
                 field_name="include_home",
                 default=target_user is not None,
             ),
-            additional_resources=list(options.get("additional_resources") or []),
+            additional_resources=_coerce_text_list(
+                options.get("additional_resources"),
+                "additional_resources",
+            ),            
             destination=options.get("destination"),
             reason=options.get("reason", f"before {operation}"),
             dry_run=_coerce_bool(
@@ -691,10 +731,16 @@ class RestorePlan:
             self.restore_type, RestoreType, RestoreType.PARTIAL
         )
         self.resources_to_restore = _dedupe_resources(self.resources_to_restore)
-        self.resources_to_overwrite = _dedupe_texts(self.resources_to_overwrite)
-        self.resources_to_omit = _dedupe_texts(self.resources_to_omit)
+        self.resources_to_overwrite = _coerce_text_list(
+            self.resources_to_overwrite,
+            "resources_to_overwrite",
+        )
+        self.resources_to_omit = _coerce_text_list(
+            self.resources_to_omit,
+            "resources_to_omit",
+        )
         self.impact = _coerce_enum(self.impact, RestoreImpact, RestoreImpact.HIGH)
-        self.warnings = _dedupe_texts(self.warnings)
+        self.warnings = _coerce_text_list(self.warnings, "warnings")
         self.metadata = _safe_metadata(self.metadata)
         self.dry_run = _coerce_bool(
             self.dry_run,
@@ -709,6 +755,7 @@ class RestorePlan:
             )
             or self.requires_confirmation_for_restore
         )
+        self.validate_versioned_restore()
 
     @property
     def contains_sensitive_resources(self) -> bool:
@@ -818,10 +865,19 @@ class RestoreSummary:
         self.final_status = _coerce_enum(
             self.final_status, RestoreStatus, RestoreStatus.UNKNOWN
         )
-        self.restored_resources = _dedupe_texts(self.restored_resources)
-        self.failed_resources = _dedupe_texts(self.failed_resources)
-        self.omitted_resources = _dedupe_texts(self.omitted_resources)
-        self.warnings = _dedupe_texts(self.warnings)
+        self.restored_resources = _coerce_text_list(
+            self.restored_resources,
+            "restored_resources",
+        )
+        self.failed_resources = _coerce_text_list(
+            self.failed_resources,
+            "failed_resources",
+        )
+        self.omitted_resources = _coerce_text_list(
+            self.omitted_resources,
+            "omitted_resources",
+        )
+        self.warnings = _coerce_text_list(self.warnings, "warnings")
         self.changes_applied = _coerce_bool(
             self.changes_applied,
             field_name="changes_applied",
