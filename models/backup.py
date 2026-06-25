@@ -430,10 +430,18 @@ class Backup:
         metadata = dict(result_data.get("metadata") or result_data)
         status = (
             BackupStatus.CREATED
-            if result_data.get("success") is True
+            if _coerce_bool(
+                result_data.get("success", False),
+                field_name="success",
+                default=False,
+            )
             else BackupStatus.FAILED
         )
-        if result_data.get("partial"):
+        if _coerce_bool(
+            result_data.get("partial", False),
+            field_name="partial",
+            default=False,
+        ):
             status = BackupStatus.PARTIAL
         return cls.from_metadata({**metadata, "status": metadata.get("status", status)})
 
@@ -586,8 +594,9 @@ class BackupCreateSpec:
                 field_name="include_home",
                 default=False,
             ),
-            additional_resources=list(
-                params.get("resources") or params.get("additional_resources") or []
+            additional_resources=_coerce_text_list(
+                params.get("resources") or params.get("additional_resources"),
+                "additional_resources",
             ),
             destination=params.get("destination"),
             reason=params.get("reason"),
@@ -649,10 +658,9 @@ class BackupCreateSpec:
 
     @classmethod
     def from_template(cls, template_data: Mapping[str, Any]) -> "BackupCreateSpec":
-        return cls.from_cli_params(
-            **dict(template_data),
-            origin=template_data.get("origin", BackupOrigin.MAINTENANCE),
-        )
+        data = dict(template_data)
+        data.setdefault("origin", BackupOrigin.MAINTENANCE)
+        return cls.from_cli_params(**data)
 
     @classmethod
     def from_config_defaults(
@@ -730,7 +738,11 @@ class RestorePlan:
         )
 
     def validate_versioned_restore(self) -> None:
-        if self.restore_type != RestoreType.DRY_RUN and not self.version:
+        if (
+            not self.dry_run
+            and self.restore_type != RestoreType.DRY_RUN
+            and not self.version
+        ):
             raise ValidationError(
                 "Restore plan requires a version for non-simulated restores."
             )
@@ -863,6 +875,12 @@ class RestoreSummary:
         final_status: RestoreStatus,
         changes_applied: bool = False,
     ) -> "RestoreSummary":
+        changes_applied_flag = _coerce_bool(
+            changes_applied,
+            field_name="changes_applied",
+            default=False,
+        )
+
         return cls(
             backup_id=plan.backup_id,
             version=plan.version,
@@ -872,7 +890,7 @@ class RestoreSummary:
             else [resource.original_path for resource in plan.resources_to_restore],
             omitted_resources=list(plan.resources_to_omit),
             warnings=list(plan.warnings),
-            changes_applied=changes_applied and not plan.dry_run,
+            changes_applied=changes_applied_flag and not plan.dry_run,
         )
 
 
@@ -1019,6 +1037,15 @@ def _dedupe_texts(values: Sequence[Any]) -> list[str]:
             seen.add(text)
             cleaned.append(text)
     return cleaned
+
+def _coerce_text_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence):
+        return _dedupe_texts(value)
+    raise ValidationError(f"{field_name} must be a string or sequence of strings.")
 
 
 def _dedupe_resources(
