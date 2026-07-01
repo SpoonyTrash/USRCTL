@@ -108,6 +108,8 @@ class ReportColumn:
 
     def __post_init__(self) -> None:
         self.name = _require_text(self.name, "column name")
+        self.data_type = _require_text(self.data_type, "column data_type")
+        self.description = _optional_text(self.description)
         self.label = self.label or self.name.replace("_", " ").title()
         self.sensitive = (
             _coerce_bool(self.sensitive, field_name="sensitive", default=False)
@@ -144,6 +146,8 @@ class ReportRow:
 
     def __post_init__(self) -> None:
         self.data = dict(self.data or {})
+        self.resource_id = _optional_text(self.resource_id)
+        self.resource_type = _optional_text(self.resource_type)
         self.sensitivity = _enum_value(SensitivityLevel, self.sensitivity, "sensitivity")
         self.warnings = _coerce_text_list(self.warnings, "row warnings")
         self.metadata = _safe_mapping(self.metadata, "row metadata")
@@ -167,9 +171,33 @@ class ReportRow:
         )
 
     def safe_data(self, include_sensitive: bool = False) -> dict[str, Any]:
+        include_sensitive = _coerce_bool(
+            include_sensitive,
+            field_name="include_sensitive",
+            default=False,
+        )
+
         if include_sensitive:
             return _json_ready(self.data)
-        return {key: ("<redacted>" if _is_sensitive_key(key) else _json_ready(value)) for key, value in self.data.items()}
+        if self.sensitivity in {SensitivityLevel.SENSITIVE, SensitivityLevel.CRITICAL}:
+            safe_keys = {"username", "uid", "gid", "groupname", "status"}
+            return {
+                key: (
+                    _json_ready_without_sensitive(value)
+                    if key in safe_keys
+                    else "<redacted>"
+                )
+                for key, value in self.data.items()
+            }
+
+        return {
+            key: (
+                "<redacted>"
+                if _is_sensitive_key(key)
+                else _json_ready_without_sensitive(value)
+            )
+            for key, value in self.data.items()
+        }
 
 @dataclass(slots=True)
 class ReportSection:
@@ -182,6 +210,7 @@ class ReportSection:
 
     def __post_init__(self) -> None:
         self.title = _require_text(self.title, "section title")
+        self.description = _optional_text(self.description)
         self.columns = [_coerce_column(column) for column in self.columns]
         self.rows = [_coerce_row(row) for row in self.rows]
         self.summary = _safe_mapping(self.summary, "section summary")
@@ -209,6 +238,12 @@ class ReportSection:
         )
     
     def to_export_dict(self, include_sensitive: bool = False) -> dict[str, Any]:
+        include_sensitive = _coerce_bool(
+            include_sensitive,
+            field_name="include_sensitive",
+            default=False,
+        )
+
         exportable_columns = [column for column in self.columns if column.exportable]
         allowed = {column.name for column in exportable_columns}
 
@@ -251,6 +286,11 @@ class ReportFilters:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.resource_type = _optional_text(self.resource_type)
+        self.status = _optional_text(self.status)
+        self.target_user = _optional_text(self.target_user)
+        self.target_group = _optional_text(self.target_group)
+        self.sort_by = _optional_text(self.sort_by)
         self.sort_direction = _enum_value(SortDirection, self.sort_direction, "sort_direction")
         self.include_system = _coerce_bool(
             self.include_system,
@@ -262,14 +302,18 @@ class ReportFilters:
             field_name="include_sensitive",
             default=False,
         )
-        self.selected_fields = _coerce_text_list(
+        self.selected_fields = _coerce_field_name_list(
             self.selected_fields,
             "selected_fields",
         )        
         self.metadata = _safe_mapping(self.metadata, "filter metadata")
         self.date_from = _coerce_date_or_datetime(self.date_from, "date_from")
         self.date_to = _coerce_date_or_datetime(self.date_to, "date_to")
-        if self.date_from and self.date_to and self.date_from > self.date_to:
+        if (
+            self.date_from
+            and self.date_to
+            and _compare_date_values(self.date_from, self.date_to) > 0
+        ):            
             raise ValidationError("Report filter date_from cannot be later than date_to.")
 
     def to_dict(self) -> dict[str, Any]:
@@ -321,7 +365,7 @@ class ReportRequest:
             field_name="dry_run",
             default=False,
         )
-        self.requested_fields = _coerce_text_list(
+        self.requested_fields = _coerce_field_name_list(            
             self.requested_fields,
             "requested_fields",
         )        
@@ -447,6 +491,38 @@ class Report:
             }
         )
 
+    def to_safe_dict(self) -> dict[str, Any]:
+        return _json_ready(
+            {
+                "report_id": self.report_id,
+                "name": self.name,
+                "report_type": self.report_type,
+                "status": self.status,
+                "format": self.format,
+                "generated_at": self.generated_at,
+                "columns": [column.to_dict() for column in self.columns],
+                "rows": [
+                    {
+                        "data": row.safe_data(include_sensitive=False),
+                        "resource_id": row.resource_id,
+                        "resource_type": row.resource_type,
+                        "sensitivity": row.sensitivity,
+                        "warnings": row.warnings,
+                        "metadata": row.metadata,
+                    }
+                    for row in self.rows
+                ],
+                "sections": [
+                    section.to_export_dict(include_sensitive=False)
+                    for section in self.sections
+                ],
+                "filters": self.filters.to_dict(),
+                "summary": self.summary.to_dict() if self.summary else None,
+                "warnings": self.warnings,
+                "metadata": self.metadata,
+            }
+        )
+
     def to_audit_dict(self, export_path: str | None = None) -> dict[str, Any]:
         return _json_ready(
             {
@@ -464,6 +540,11 @@ class Report:
         )
 
     def to_export_payload(self, include_sensitive: bool = False) -> dict[str, Any]:
+        include_sensitive = _coerce_bool(
+            include_sensitive,
+            field_name="include_sensitive",
+            default=False,
+        )
         exportable_columns = [column for column in self.columns if column.exportable]
         allowed = {column.name for column in exportable_columns}
         rows = []
@@ -477,7 +558,8 @@ class Report:
                 "sections": [
                     section.to_export_dict(include_sensitive=include_sensitive)
                     for section in self.sections
-                ],                "metadata": self.metadata,
+                ],                
+                "metadata": self.metadata,
                 "summary": self.summary.to_dict() if self.summary else None,
             }
         )
@@ -635,9 +717,20 @@ class ReportExportResult:
 
     def __post_init__(self) -> None:
         self.format = _enum_value(ReportFormat, self.format, "format")
+        self.output_path = _optional_text(self.output_path)
         self.status = _enum_value(ReportStatus, self.status, "status")
-        if self.record_count < 0:
-            raise ValidationError("Export record_count cannot be negative.")
+        self.record_count = _coerce_non_negative_int(
+            self.record_count,
+            "record_count",
+        )
+        self.approximate_size_bytes = (
+            None
+            if self.approximate_size_bytes is None
+            else _coerce_non_negative_int(
+                self.approximate_size_bytes,
+                "approximate_size_bytes",
+            )
+        )
         self.changes_applied = _coerce_bool(
             self.changes_applied,
             field_name="changes_applied",
@@ -738,6 +831,13 @@ def _require_text(value: str, field_name: str) -> str:
         raise ValidationError(f"Report {field_name} cannot be blank.")
     return text
 
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _coerce_bool(
     value: Any,
     *,
@@ -774,6 +874,35 @@ def _coerce_bool(
     raise ValidationError(
         f"Report {field_name} must be a boolean-like value."
     )
+
+def _coerce_field_name_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+
+    if not isinstance(value, Sequence):
+        raise ValidationError(
+            f"Report {field_name} must be a string or sequence of strings."
+        )
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for item in value:
+        if not isinstance(item, str):
+            raise ValidationError(
+                f"Report {field_name} items must be strings."
+            )
+
+        text = item.strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+
+    return result
 
 def _coerce_text_list(value: Any, field_name: str) -> list[str]:
     if value is None:
@@ -841,6 +970,24 @@ def _json_ready_without_sensitive(value: Any) -> Any:
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_json_ready_without_sensitive(item) for item in value]
     return value
+
+def _as_utc_datetime(value: date | datetime) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=timezone.utc)
+
+    return datetime.combine(value, datetime.min.time(), timezone.utc)
+
+def _compare_date_values(left: date | datetime, right: date | datetime) -> int:
+    left_dt = _as_utc_datetime(left)
+    right_dt = _as_utc_datetime(right)
+
+    if left_dt > right_dt:
+        return 1
+    if left_dt < right_dt:
+        return -1
+    return 0
 
 def _coerce_date_or_datetime(value: Any, field_name: str) -> date | datetime | None:
     if value is None:
