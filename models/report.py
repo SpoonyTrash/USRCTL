@@ -51,7 +51,7 @@ class ReportType(str, Enum):
     GROUPS = "groups"
     GROUP_MEMBERS = "group_members"
     ACTIVE_USERS = "active_users"
-    LOCKED_USERS = "locked_usets"
+    LOCKED_USERS = "locked_users"
     SUDO_USERS = "sudo_users"
     POLICIES = "policies"
     SECURITY = "security"
@@ -109,9 +109,16 @@ class ReportColumn:
     def __post_init__(self) -> None:
         self.name = _require_text(self.name, "column name")
         self.label = self.label or self.name.replace("_", " ").title()
-        self.sensitive = self.sensitive or _is_sensitive_key(self.name)
-        if self.order < 0:
-            raise ValidationError("Report column order cannot be negative.")
+        self.sensitive = (
+            _coerce_bool(self.sensitive, field_name="sensitive", default=False)
+            or _is_sensitive_key(self.name)
+        )
+        self.exportable = _coerce_bool(
+            self.exportable,
+            field_name="exportable",
+            default=True,
+        )
+        self.order = _coerce_non_negative_int(self.order, "column order")
 
     def to_dict(self) -> dict[str, Any]:
         return _json_ready(
@@ -138,7 +145,7 @@ class ReportRow:
     def __post_init__(self) -> None:
         self.data = dict(self.data or {})
         self.sensitivity = _enum_value(SensitivityLevel, self.sensitivity, "sensitivity")
-        self.warnings = [str(warning) for warning in self.warnings]
+        self.warnings = _coerce_text_list(self.warnings, "row warnings")
         self.metadata = _safe_mapping(self.metadata, "row metadata")
     
     @property
@@ -178,7 +185,7 @@ class ReportSection:
         self.columns = [_coerce_column(column) for column in self.columns]
         self.rows = [_coerce_row(row) for row in self.rows]
         self.summary = _safe_mapping(self.summary, "section summary")
-        self.warnings = [str(warning) for warning in self.warnings]
+        self.warnings = _coerce_text_list(self.warnings, "section warnings")
         _validate_row_columns(self.columns, self.rows, allow_extra=True)
 
     @property
@@ -196,6 +203,33 @@ class ReportSection:
                 "description": self.description,
                 "columns": [column.to_dict() for column in self.columns],
                 "rows": [row.to_dict() for row in self.rows],
+                "summary": self.summary,
+                "warnings": self.warnings,
+            }
+        )
+    
+    def to_export_dict(self, include_sensitive: bool = False) -> dict[str, Any]:
+        exportable_columns = [column for column in self.columns if column.exportable]
+        allowed = {column.name for column in exportable_columns}
+
+        rows: list[dict[str, Any]] = []
+
+        for row in self.rows:
+            data = row.safe_data(include_sensitive=include_sensitive)
+            rows.append(
+                {
+                    key: value
+                    for key, value in data.items()
+                    if not allowed or key in allowed
+                }
+            )
+
+        return _json_ready(
+            {
+                "title": self.title,
+                "description": self.description,
+                "columns": [column.to_dict() for column in exportable_columns],
+                "rows": rows,
                 "summary": self.summary,
                 "warnings": self.warnings,
             }
@@ -218,8 +252,23 @@ class ReportFilters:
 
     def __post_init__(self) -> None:
         self.sort_direction = _enum_value(SortDirection, self.sort_direction, "sort_direction")
-        self.selected_fields = [str(field_name) for field_name in self.selected_fields]
+        self.include_system = _coerce_bool(
+            self.include_system,
+            field_name="include_system",
+            default=False,
+        )
+        self.include_sensitive = _coerce_bool(
+            self.include_sensitive,
+            field_name="include_sensitive",
+            default=False,
+        )
+        self.selected_fields = _coerce_text_list(
+            self.selected_fields,
+            "selected_fields",
+        )        
         self.metadata = _safe_mapping(self.metadata, "filter metadata")
+        self.date_from = _coerce_date_or_datetime(self.date_from, "date_from")
+        self.date_to = _coerce_date_or_datetime(self.date_to, "date_to")
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValidationError("Report filter date_from cannot be later than date_to.")
 
@@ -257,7 +306,25 @@ class ReportRequest:
         self.report_type = _enum_value(ReportType, self.report_type, "report_type")
         self.format = _enum_value(ReportFormat, self.format, "format")
         self.filters = _coerce_filters(self.filters)
-        self.requested_fields = [str(field_name) for field_name in self.requested_fields]
+        self.include_details = _coerce_bool(
+            self.include_details,
+            field_name="include_details",
+            default=False,
+        )
+        self.include_sensitive = _coerce_bool(
+            self.include_sensitive,
+            field_name="include_sensitive",
+            default=False,
+        )
+        self.dry_run = _coerce_bool(
+            self.dry_run,
+            field_name="dry_run",
+            default=False,
+        )
+        self.requested_fields = _coerce_text_list(
+            self.requested_fields,
+            "requested_fields",
+        )        
         self.metadata = _safe_mapping(self.metadata, "request metadata")
         if self.include_sensitive:
             self.filters.include_sensitive = True
@@ -306,9 +373,10 @@ class Report:
         self.sections = [_coerce_section(section) for section in self.sections]
         self.filters = _coerce_filters(self.filters)
         self.summary = _coerce_summary(self.summary) if self.summary is not None else ReportSummary.from_report(self)
-        self.warnings = [str(warning) for warning in self.warnings]
+        self.warnings =  _coerce_text_list(self.warnings, "report warnings")
         self.metadata = _safe_mapping(self.metadata, "report metadata")
         _validate_row_columns(self.columns, self.rows, allow_extra=True)
+        self.validate()
 
     @property
     def is_empty(self) -> bool:
@@ -406,8 +474,10 @@ class Report:
             {
                 "columns": [column.to_dict() for column in exportable_columns],
                 "rows": rows,
-                "sections": [section.to_dict() for section in self.sections],
-                "metadata": self.metadata,
+                "sections": [
+                    section.to_export_dict(include_sensitive=include_sensitive)
+                    for section in self.sections
+                ],                "metadata": self.metadata,
                 "summary": self.summary.to_dict() if self.summary else None,
             }
         )
@@ -437,11 +507,37 @@ class ReportSummary:
     is_empty: bool = True
 
     def __post_init__(self) -> None:
-        if min(self.total_records, self.filtered_records, self.omitted_records, self.warning_count) < 0:
-            raise ValidationError("Report summary counters cannot be negative.")
-        self.counts_by_status = {str(key): int(value) for key, value in self.counts_by_status.items()}
-        self.counts_by_severity = {str(key): int(value) for key, value in self.counts_by_severity.items()}
-        self.warning_summary = [str(warning) for warning in self.warning_summary]
+        self.total_records = _coerce_non_negative_int(
+            self.total_records,
+            "total_records",
+        )
+        self.filtered_records = _coerce_non_negative_int(
+            self.filtered_records,
+            "filtered_records",
+        )
+        self.omitted_records = _coerce_non_negative_int(
+            self.omitted_records,
+            "omitted_records",
+        )
+        self.warning_count = _coerce_non_negative_int(
+            self.warning_count,
+            "warning_count",
+        )
+
+        self.counts_by_status = {
+            str(key): _coerce_non_negative_int(value, f"counts_by_status[{key}]")
+            for key, value in self.counts_by_status.items()
+        }
+
+        self.counts_by_severity = {
+            str(key): _coerce_non_negative_int(value, f"counts_by_severity[{key}]")
+            for key, value in self.counts_by_severity.items()
+        }
+
+        self.warning_summary = _coerce_text_list(
+            self.warning_summary,
+            "warning_summary",
+        )
 
     @classmethod
     def from_report(cls, report: Report) -> "ReportSummary":
@@ -485,6 +581,31 @@ class ReportExportSpec:
     def __post_init__(self) -> None:
         self.format = _enum_value(ReportFormat, self.format, "format")
         self.destination_path = _require_text(self.destination_path, "destination_path")
+        self.include_headers = _coerce_bool(
+            self.include_headers,
+            field_name="include_headers",
+            default=True,
+        )
+        self.include_metadata = _coerce_bool(
+            self.include_metadata,
+            field_name="include_metadata",
+            default=True,
+        )
+        self.include_sensitive = _coerce_bool(
+            self.include_sensitive,
+            field_name="include_sensitive",
+            default=False,
+        )
+        self.overwrite = _coerce_bool(
+            self.overwrite,
+            field_name="overwrite",
+            default=False,
+        )
+        self.dry_run = _coerce_bool(
+            self.dry_run,
+            field_name="dry_run",
+            default=False,
+        )
         if self.format not in {ReportFormat.JSON, ReportFormat.CSV, ReportFormat.SUMMARY, ReportFormat.TABLE}:
             raise ValidationError("Export format must be JSON, CSV, summary or table.")
 
@@ -517,7 +638,12 @@ class ReportExportResult:
         self.status = _enum_value(ReportStatus, self.status, "status")
         if self.record_count < 0:
             raise ValidationError("Export record_count cannot be negative.")
-        self.warnings = [str(warning) for warning in self.warnings]
+        self.changes_applied = _coerce_bool(
+            self.changes_applied,
+            field_name="changes_applied",
+            default=False,
+        )
+        self.warnings = _coerce_text_list(self.warnings, "export result warnings")
         self.metadata = _safe_mapping(self.metadata, "export result metadata")
 
     def to_dict(self) -> dict[str, Any]:
@@ -612,11 +738,156 @@ def _require_text(value: str, field_name: str) -> str:
         raise ValidationError(f"Report {field_name} cannot be blank.")
     return text
 
+def _coerce_bool(
+    value: Any,
+    *,
+    field_name: str,
+    default: bool | None = None,
+) -> bool:
+    if value is None:
+        if default is not None:
+            return default
+        raise ValidationError(
+            f"Report {field_name} must be a boolean-like value."
+        )
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValidationError(
+            f"Report {field_name} must be a boolean-like value."
+        )
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+        if normalized in {"false", "no", "n", "0"}:
+            return False
+        raise ValidationError(
+            f"Report {field_name} must be one of: true/false, yes/no, 1/0."
+        )
+
+    raise ValidationError(
+        f"Report {field_name} must be a boolean-like value."
+    )
+
+def _coerce_text_list(value: Any, field_name: str) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+
+    if isinstance(value, Sequence):
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for item in value:
+            text = str(item).strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+
+        return result
+
+    raise ValidationError(
+        f"Report {field_name} must be a string or sequence of strings."
+    )
+
 def _safe_mapping(value: Mapping[str, Any] | None, field_name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+
+    if not isinstance(value, Mapping):
+        raise ValidationError(
+            f"Report {field_name} must be a serializable mapping."
+        )
+
+    safe: dict[str, Any] = {}
+
+    for key, item in value.items():
+        normalized_key = str(key).strip()
+
+        if not normalized_key:
+            raise ValidationError(
+                f"Report {field_name} keys cannot be blank."
+            )
+
+        if _is_sensitive_key(normalized_key):
+            continue
+
+        safe[normalized_key] = _json_ready_without_sensitive(item)
+
+    return safe
+
+def _json_ready_without_sensitive(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_ready_without_sensitive(item)
+            for key, item in value.items()
+            if not _is_sensitive_key(str(key))
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_ready_without_sensitive(item) for item in value]
+    return value
+
+def _coerce_date_or_datetime(value: Any, field_name: str) -> date | datetime | None:
+    if value is None:
+        return None
+
+    if isinstance(value, (date, datetime)):
+        return value
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+
+        try:
+            if "T" in text or ":" in text:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+            return date.fromisoformat(text)
+        except ValueError as exc:
+            raise ValidationError(
+                f"Report {field_name} must be an ISO date or datetime."
+            ) from exc
+
+    raise ValidationError(
+        f"Report {field_name} must be a date, datetime or ISO string."
+    )
+
+def _coerce_non_negative_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ValidationError(
+            f"Report {field_name} must be an integer, not boolean."
+        )
     try:
-        return dict(value or {})
+        result = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValidationError(f"Report {field_name} must be a serializable mapping.") from exc
+        raise ValidationError(
+            f"Report {field_name} must be a non-negative integer."
+        ) from exc
+
+    if result < 0:
+        raise ValidationError(
+            f"Report {field_name} cannot be negative."
+        )
+
+    return result
+
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = str(key).lower()
@@ -632,8 +903,15 @@ def _coerce_column(column: ReportColumn | Mapping[str, Any] | str) -> ReportColu
 def _coerce_row(row: ReportRow | Mapping[str, Any]) -> ReportRow:
     if isinstance(row, ReportRow):
         return row
-    return ReportRow(data=dict(row))
+    if not isinstance(row, Mapping):
+        raise ValidationError("Report row must be a ReportRow or mapping.")
 
+    data = dict(row)
+
+    if "data" in data:
+        return ReportRow(**data)
+
+    return ReportRow(data=data)
 def _coerce_section(section: ReportSection | Mapping[str, Any]) -> ReportSection:
     if isinstance(section, ReportSection):
         return section
@@ -695,6 +973,7 @@ __all__ = [
     "Report",
     "ReportSummary",
     "ReportExportSpec",
+    "ReportExportResult",
     "report_from_records",
     "users_report",
     "groups_report",
