@@ -310,10 +310,12 @@ class LinuxUserManager:
         username: str, 
         *, 
         remove_home: bool = False, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
         self.ensure_user_exists(username)
+        self.ensure_not_protected_user(username, operation="delete_user", allow_protected=allow_protected)
         warnings = self.warn_if_protected_user(username)
         action = "delete_user_home" if remove_home else "delete_user"
         affected = [username]
@@ -347,8 +349,11 @@ class LinuxUserManager:
         spec: UserUpdateSpec, 
         *, 
         move_home: bool = False, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
+        spec.username = _normalize_username(spec.username)
+        self.ensure_not_protected_user(spec.username, operation="modify_user", allow_protected=allow_protected)
         self.ensure_user_exists(spec.username)
         command = _build_usermod_command(
             spec.username, 
@@ -384,12 +389,15 @@ class LinuxUserManager:
         self, 
         username: str, 
         uid: int, *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
+        username = _normalize_username(username)
+        self.ensure_not_protected_user(username, operation="change_uid", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         self.ensure_uid_available(uid)
         return self._execute_user_command(
-            _build_usermod_command(_normalize_username(username), uid=uid), 
+            _build_usermod_command(username, uid=uid), 
             action="modify_user", 
             username=username, 
             dry_run=dry_run, 
@@ -405,13 +413,15 @@ class LinuxUserManager:
         home: str, 
         *, 
         move_home: bool = False, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
         home = _normalize_home(home) or ""
         if not home:
             raise HomeDirectoryError("Home directory path cannot be empty.")
         self.ensure_user_exists(username)
+        self.ensure_not_protected_user(username, operation="change_home", allow_protected=allow_protected)
         return self._execute_user_command(
             _build_usermod_command(
                 username, 
@@ -431,12 +441,14 @@ class LinuxUserManager:
         username: str, 
         shell: str, 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
         shell = _normalize_shell(shell) or ""
         self.ensure_user_exists(username)
         self.ensure_shell_installed(shell)
+        self.ensure_not_protected_user(username, operation="change_shell", allow_protected=allow_protected)
         return self._execute_user_command(
             _build_usermod_command(username, shell=shell), 
             action="change_user_shell", 
@@ -453,10 +465,12 @@ class LinuxUserManager:
         username: str, 
         gecos: str, 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
         self.ensure_user_exists(username)
+        self.ensure_not_protected_user(username, operation="change_gecos", allow_protected=allow_protected)
         return self._execute_user_command(
             _build_usermod_command(username, gecos=gecos), 
             action="modify_user", 
@@ -473,13 +487,16 @@ class LinuxUserManager:
         username: str, 
         groups: Sequence[str], 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
+        self.ensure_not_protected_user(username, operation="replace_user_groups", allow_protected=allow_protected)
         return self.assign_secondary_groups(
             username, 
             groups, 
             append=False, 
-            dry_run=dry_run
+            dry_run=dry_run,
+            allow_protected=allow_protected
         )
 
     def add_user_to_groups(
@@ -487,13 +504,16 @@ class LinuxUserManager:
         username: str, 
         groups: Sequence[str], 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
+        self.ensure_not_protected_user(username, operation="add_user_to_groups", allow_protected=allow_protected)
         return self.assign_secondary_groups(
             username, 
             groups, 
             append=True, 
-            dry_run=dry_run
+            dry_run=dry_run, 
+            allow_protected=allow_protected
         )
 
     def remove_user_from_groups(
@@ -501,9 +521,11 @@ class LinuxUserManager:
         username: str, 
         groups: Sequence[str], 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
+        self.ensure_not_protected_user(username, operation="remove_user_from_groups", allow_protected=allow_protected)
         remove = set(_normalize_groups(groups))
         current = self.get_secondary_groups(username)
         remaining = [group for group in current if group not in remove]
@@ -511,16 +533,19 @@ class LinuxUserManager:
             username, 
             remaining, 
             append=False, 
-            dry_run=dry_run
+            dry_run=dry_run, 
+            allow_protected=allow_protected
         )
     
     def lock_user(
         self, 
         username: str, 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
+        self.ensure_not_protected_user(username, operation="lock_user", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         return self._execute_user_command(
             _build_usermod_command(username, lock=True), 
@@ -537,9 +562,11 @@ class LinuxUserManager:
         self, 
         username: str, 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
+        self.ensure_not_protected_user(username, operation="unlock_user", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         return self._execute_user_command(
             _build_usermod_command(username, unlock=True), 
@@ -594,7 +621,8 @@ class LinuxUserManager:
         groups: Sequence[str], 
         *, 
         append: bool = False, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> CommandResult | DryRunResult:
         username = _normalize_username(username)
         self.ensure_user_exists(username)
@@ -604,6 +632,7 @@ class LinuxUserManager:
             groups=normalized, 
             append_groups=append
         )
+        self.ensure_not_protected_user(username, operation="assign_user_groups", allow_protected=allow_protected)
         return self._execute_user_command(
             command, 
             action="assign_user_groups", 
@@ -676,6 +705,25 @@ class LinuxUserManager:
         elif not Path(shell).exists():
             raise InvalidShellError("Shell path does not exist.", details={"shell": shell})
     
+    def ensure_not_protected_user(
+        self,
+        username: str,
+        *,
+        operation: str,
+        allow_protected: bool = False,
+    ) -> None:
+        username = _normalize_username(username)
+
+        if username in PROTECTED_USERS and not allow_protected:
+            raise ValidationError(
+                "Operation is blocked for protected system user.",
+                details={
+                    "username": username,
+                    "operation": operation,
+                    "allow_protected_required": True,
+                },
+            )
+
     def warn_if_protected_user(self, username: str) -> list[str]:
         username = str(username).strip()
         if username in PROTECTED_USERS:
