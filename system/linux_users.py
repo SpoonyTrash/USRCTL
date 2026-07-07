@@ -108,6 +108,39 @@ def _validate_uid(uid: Any) -> int:
             details={"uid": uid},
         )
     return uid
+    
+def _validate_gid(gid: Any) -> int:
+    if isinstance(gid, bool) or not isinstance(gid, int) or gid < 0:
+        raise ValidationError(
+            "GID must be a non-negative integer.",
+            details={"gid": gid},
+        )
+    return gid
+
+
+def _coerce_bool(value: Any, *, field_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValidationError(f"{field_name} must be a boolean-like value.")
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+        if normalized in {"false", "no", "n", "0"}:
+            return False
+        raise ValidationError(
+            f"{field_name} must be one of: true/false, yes/no, 1/0."
+        )
+
+    raise ValidationError(f"{field_name} must be a boolean-like value.")
 
 def _normalize_gecos(gecos: Any) -> str:
     text = str(gecos).strip()
@@ -145,9 +178,23 @@ def _parse_id_output(output: str) -> dict[str, Any]:
     payload: dict[str, Any] = {"groups": []}
     for token in output.strip().split():
         if token.startswith("uid="):
-            payload["uid"] = int(token.split("=", 1)[1].split("(", 1)[0])
+            try:
+                payload["uid"] = int(token.split("=", 1)[1].split("(", 1)[0])
+            except ValueError as exc:
+                raise ValidationError(
+                    "Invalid uid value in id output.",
+                    details={"output": output},
+                    cause=exc,
+                ) from exc        
         elif token.startswith("gid="):
-            payload["gid"] = int(token.split("=", 1)[1].split("(", 1)[0])
+            try:
+                payload["gid"] = int(token.split("=", 1)[1].split("(", 1)[0])
+            except ValueError as exc:
+                raise ValidationError(
+                    "Invalid gid value in id output.",
+                    details={"output": output},
+                    cause=exc,
+                ) from exc
         elif token.startswith("groups="):
             groups: list[str] = []
             for item in token.split("=", 1)[1].split(","):
@@ -158,7 +205,7 @@ def _parse_id_output(output: str) -> dict[str, Any]:
 
 def _parse_groups_output(output: str, *, colon_format: bool = False) -> list[str]:
     text = output.strip()
-    if colon_format and ":" in text:        
+    if colon_format and ":" in text:  
         text = text.split(":", 1)[1]
     return _normalize_groups(text.split())
 
@@ -261,8 +308,6 @@ class LinuxUserManager:
         return self._mark_privileges(user)
 
     def get_user_by_uid(self, uid: int) -> SystemUser:
-        if not isinstance(uid, int) or uid < 0:
-            raise InvalidUidError("UID must be a non-negative integer.", details={"uid": uid})
         uid = _validate_uid(uid)
         result = self._execute_query(_build_getent_passwd_command(uid), action="query_user", target=str(uid))
         if not result.ok:
@@ -325,13 +370,14 @@ class LinuxUserManager:
         dry_run: bool | None = None
     ) -> SystemResult:
         username = _normalize_username(username, allow_reserved=False)
+        uid = None if uid is None else _validate_uid(uid)
         normalized_shell = _normalize_shell(shell) or "/bin/sh"
         self.ensure_shell_installed(normalized_shell)
         spec = UserCreateSpec(
             username=username, 
             uid=uid, 
             home=_normalize_home(home), 
-            shell=_normalize_shell,
+            shell=normalized_shell,
             groups=_normalize_groups(groups), 
             create_home=create_home
         )
@@ -343,28 +389,36 @@ class LinuxUserManager:
         *, 
         dry_run: bool | None = None
     ) -> SystemResult:
-        spec.username = _normalize_username(spec.username, allow_reserved=False)        
-        self.ensure_user_absent(spec.username)
-        if spec.uid is not None:
-            self.ensure_uid_available(spec.uid)
-        if spec.shell:
-            self.ensure_shell_installed(spec.shell)
-        command = _build_useradd_command(spec)
-        warnings = self.warn_if_protected_user(spec.username)
+        normalized_shell = _normalize_shell(spec.shell) or "/bin/sh"
+        normalized_spec = UserCreateSpec(
+            username=_normalize_username(spec.username, allow_reserved=False),
+            uid=None if spec.uid is None else _validate_uid(spec.uid),
+            gid=None if spec.gid is None else _validate_gid(spec.gid),
+            home=_normalize_home(spec.home),
+            shell=normalized_shell,
+            groups=_normalize_groups(spec.groups),
+            create_home=spec.create_home,
+        )
+        self.ensure_user_absent(normalized_spec.username)
+        if normalized_spec.uid is not None:
+            self.ensure_uid_available(normalized_spec.uid)
+        self.ensure_shell_installed(normalized_shell)
+        command = _build_useradd_command(normalized_spec)
+        warnings = self.warn_if_protected_user(normalized_spec.username)
         return self._execute_user_command(
             command, 
             action="create_user", 
-            username=spec.username, 
+            username=normalized_spec.username, 
             dry_run=dry_run, 
             changes={
-                "created_user": spec.username, 
-                "create_home": spec.create_home, 
-                "home": spec.home, 
-                "uid": spec.uid, 
-                "groups": list(spec.groups)
+                "created_user": normalized_spec.username, 
+                "create_home": normalized_spec.create_home, 
+                "home": normalized_spec.home, 
+                "uid": normalized_spec.uid, 
+                "groups": list(normalized_spec.groups)
             }, 
             warnings=warnings, 
-            affected=[spec.username, spec.home or str(self.home_root / spec.username)], 
+            affected=[normalized_spec.username, normalized_spec.home or str(self.home_root / normalized_spec.username)],
             impact=ImpactLevel.MEDIUM
         )
 
@@ -401,8 +455,33 @@ class LinuxUserManager:
             impact=ImpactLevel.CRITICAL if remove_home else ImpactLevel.HIGH
         )
 
-    def delete_user_only(self, username: str, *, dry_run: bool | None = None) -> SystemResult:        
-        return self.delete_user(username, remove_home=False, dry_run=dry_run)
+    def delete_user_only(
+        self,
+        username: str,
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
+    ) -> SystemResult:
+        return self.delete_user(
+            username,
+            remove_home=False,
+            dry_run=dry_run,
+            allow_protected=allow_protected,
+        )
+
+    def delete_user_and_home(
+        self,
+        username: str,
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
+    ) -> SystemResult:
+        return self.delete_user(
+            username,
+            remove_home=True,
+            dry_run=dry_run,
+            allow_protected=allow_protected,
+        )
 
     def delete_user_and_home(self, username: str, *, dry_run: bool | None = None) -> SystemResult:
         return self.delete_user(username, remove_home=True, dry_run=dry_run)
@@ -591,6 +670,7 @@ class LinuxUserManager:
     ) -> SystemResult:
         username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="remove_user_from_groups", allow_protected=allow_protected)
+        self.ensure_user_exists(username)
         remove = set(_normalize_groups(groups))
         if not remove:
             return self._skipped_result(
@@ -600,7 +680,6 @@ class LinuxUserManager:
             )
         current = self.get_secondary_groups(username)
         remaining = [group for group in current if group not in remove]
-        self.ensure_user_exists(username)
         return self._execute_user_command(
             _build_usermod_command(username, groups=remaining),
             action="remove_user_from_groups",
@@ -730,8 +809,19 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
+        self.ensure_not_protected_user(
+            username,
+            operation="assign_secondary_groups",
+            allow_protected=allow_protected,
+        )
         self.ensure_user_exists(username)
         normalized = _normalize_groups(groups)
+        if append and not normalized:
+            return self._skipped_result(
+                "assign_user_groups",
+                username,
+                "No groups requested for append operation.",
+            )
         command = _build_usermod_command(
             username, 
             groups=normalized, 
@@ -751,7 +841,10 @@ class LinuxUserManager:
     
     def user_in_group(self, username: str, group: str) -> bool:
         username = _normalize_username(username)
-        group = validate_groupname(str(group).strip(), allow_reserved=True)
+        group_text = str(group).strip()
+        if not group_text:
+            raise ValidationError("Group name cannot be empty.")
+        group = validate_groupname(group_text, allow_reserved=True)        
         return group in self.get_user_groups(username)
     
     def is_root_user(self, user: str | SystemUser) -> bool:
@@ -783,11 +876,7 @@ class LinuxUserManager:
     
     def check_required_commands(self) -> dict[str, bool]:
         return {
-            binary: self._execute_query(
-                ["command", "-v", binary],
-                action="check_dependency",
-                target=binary,
-            ).ok
+            binary: self.executor.check_dependency(binary).ok
             for binary in REQUIRED_COMMANDS
         }
     
@@ -829,6 +918,11 @@ class LinuxUserManager:
         allow_protected: bool = False,
     ) -> None:
         username = _normalize_username(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
 
         if username in PROTECTED_USERS and not allow_protected:
             raise ValidationError(
