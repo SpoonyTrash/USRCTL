@@ -431,8 +431,13 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:        
         username = _normalize_username(username)
-        self.ensure_user_exists(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="delete_user", allow_protected=allow_protected)
+        self.ensure_user_exists(username)
         warnings = self.warn_if_protected_user(username)
         action = "delete_user_home" if remove_home else "delete_user"
         affected = [username]
@@ -449,8 +454,10 @@ class LinuxUserManager:
             action=action, 
             username=username, 
             dry_run=dry_run, 
-            changes={"deleted_user": username, "remove_home": remove_home}, 
-            warnings=warnings, 
+            changes=self._with_allow_protected_audit(
+                {"deleted_user": username, "remove_home": remove_home},
+                allow_protected=allow_protected,
+            ),            warnings=warnings, 
             affected=affected, 
             impact=ImpactLevel.CRITICAL if remove_home else ImpactLevel.HIGH
         )
@@ -482,9 +489,6 @@ class LinuxUserManager:
             dry_run=dry_run,
             allow_protected=allow_protected,
         )
-
-    def delete_user_and_home(self, username: str, *, dry_run: bool | None = None) -> SystemResult:
-        return self.delete_user(username, remove_home=True, dry_run=dry_run)
     
     def modify_user(
         self, 
@@ -494,37 +498,48 @@ class LinuxUserManager:
         dry_run: bool | None = None,
         allow_protected: bool = False
     ) -> SystemResult:        
-        spec.username = _normalize_username(spec.username)
-        self.ensure_not_protected_user(spec.username, operation="modify_user", allow_protected=allow_protected)
-        self.ensure_user_exists(spec.username)
+        username = _normalize_username(spec.username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+        self.ensure_not_protected_user(username, operation="modify_user", allow_protected=allow_protected)
+        self.ensure_user_exists(username)
+        new_home = _normalize_home(spec.new_home)
+        new_shell = _normalize_shell(spec.new_shell)
+        groups = None if spec.groups is None else _normalize_groups(spec.groups)
+        if new_shell:
+            self.ensure_shell_installed(new_shell)
         command = _build_usermod_command(
-            spec.username, 
-            home=spec.new_home, 
+            username, 
+            home=new_home, 
             move_home=move_home, 
-            shell=spec.new_shell, 
+            shell=new_shell, 
             groups=spec.groups
         )
-        if command == [CMD_USERMOD, spec.username]:
+        if command == [CMD_USERMOD, username]:
             return self._skipped_result(
                 "modify_user", 
-                spec.username, 
+                username, 
                 "No usermod-compatible changes requested."
             )
-        if spec.new_shell:
-            self.ensure_shell_installed(spec.new_shell)
         return self._execute_user_command(
-            command, 
-            action="modify_user", 
-            username=spec.username, 
-            dry_run=dry_run, 
-            changes={
-                "new_home": spec.new_home, 
-                "move_home": move_home, 
-                "new_shell": spec.new_shell, 
-                "groups": spec.groups
-            }, 
-            warnings=self.warn_if_protected_user(spec.username), 
-            affected=[spec.username, spec.new_home] if spec.new_home else [spec.username], 
+            command,
+            action="modify_user",
+            username=username,
+            dry_run=dry_run,
+            changes=self._with_allow_protected_audit(
+                {
+                    "new_home": new_home,
+                    "move_home": move_home,
+                    "new_shell": new_shell,
+                    "groups": groups,
+                },
+                allow_protected=allow_protected,
+            ),
+            warnings=self.warn_if_protected_user(username),
+            affected=[username, new_home] if new_home else [username],
             impact=ImpactLevel.MEDIUM)
 
     def change_uid(            
@@ -535,6 +550,12 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:        
         username = _normalize_username(username)
+        uid = _validate_uid(uid)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="change_uid", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         self.ensure_uid_available(uid)
@@ -543,7 +564,7 @@ class LinuxUserManager:
             action="modify_user", 
             username=username, 
             dry_run=dry_run, 
-            changes={"uid": uid}, 
+            changes=self._with_allow_protected_audit({"uid": uid}, allow_protected=allow_protected),
             warnings=self.warn_if_protected_user(username), 
             affected=[username], 
             impact=ImpactLevel.HIGH
@@ -562,8 +583,13 @@ class LinuxUserManager:
         home = _normalize_home(home) or ""
         if not home:
             raise HomeDirectoryError("Home directory path cannot be empty.")
-        self.ensure_user_exists(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )        
         self.ensure_not_protected_user(username, operation="change_home", allow_protected=allow_protected)
+        self.ensure_user_exists(username)
         return self._execute_user_command(
             _build_usermod_command(
                 username, 
@@ -573,7 +599,7 @@ class LinuxUserManager:
             action="change_user_home", 
             username=username, 
             dry_run=dry_run, 
-            changes={"home": home, "move_home": move_home}, 
+            changes=self._with_allow_protected_audit({"home": home, "move_home": move_home}, allow_protected=allow_protected),
             warnings=self.warn_if_protected_user(username), 
             affected=[username, home], 
             impact=ImpactLevel.HIGH if move_home else ImpactLevel.MEDIUM)
@@ -588,15 +614,20 @@ class LinuxUserManager:
     ) -> SystemResult:
         username = _normalize_username(username)
         shell = _normalize_shell(shell) or ""
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+        self.ensure_not_protected_user(username, operation="change_shell", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         self.ensure_shell_installed(shell)
-        self.ensure_not_protected_user(username, operation="change_shell", allow_protected=allow_protected)
         return self._execute_user_command(
             _build_usermod_command(username, shell=shell), 
             action="change_user_shell", 
             username=username, 
             dry_run=dry_run, 
-            changes={"shell": shell}, 
+            changes=self._with_allow_protected_audit({"shell": shell}, allow_protected=allow_protected), 
             warnings=self.warn_if_protected_user(username), 
             affected=[username], 
             impact=ImpactLevel.MEDIUM
@@ -611,14 +642,19 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
-        self.ensure_user_exists(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )        
         self.ensure_not_protected_user(username, operation="change_gecos", allow_protected=allow_protected)
+        self.ensure_user_exists(username)
         return self._execute_user_command(
             _build_usermod_command(username, gecos=gecos), 
             action="modify_user", 
             username=username, 
             dry_run=dry_run, 
-            changes={"gecos": gecos}, 
+            changes=self._with_allow_protected_audit({"gecos": gecos}, allow_protected=allow_protected),
             warnings=[], 
             affected=[username], 
             impact=ImpactLevel.LOW
@@ -766,7 +802,6 @@ class LinuxUserManager:
         username = _normalize_username(username)
         return self.get_password_lock_status(username) == PasswordStatus.LOCKED
 
-   #CONTINUAR CORRECCION AQUI 
     def has_non_interactive_shell(self, username: str) -> bool:
         username = _normalize_username(username)
         return (self.get_user(
@@ -986,6 +1021,17 @@ class LinuxUserManager:
         if result.action in {"lock_user", "unlock_user"}:
             raise AccountLockError("Unable to lock or unlock user.", details=result.to_log_record())
         raise CommandExecutionError("Linux user command failed.", details=result.to_log_record())
+
+    def _with_allow_protected_audit(
+        self,
+        changes: Mapping[str, Any],
+        *,
+        allow_protected: bool,
+    ) -> dict[str, Any]:
+        audited = dict(changes)
+        if allow_protected:
+            audited["allow_protected"] = True
+        return audited
     
     def _execute_user_command(
         self, 
@@ -999,16 +1045,20 @@ class LinuxUserManager:
         affected: Sequence[str | None], 
         impact: ImpactLevel
     ) -> SystemResult:
+        metadata = {
+            "changes": dict(changes),
+            "affected_resources": [item for item in affected if item],
+            "module": "system.linux_users",
+        }
+        if changes.get("allow_protected") is True:
+            metadata["allow_protected"] = True
+
         result = self.executor.execute(
             command, 
             action=action, 
             target=username, 
             dry_run=dry_run, 
-            metadata={
-                "changes": dict(changes), 
-                "affected_resources": [item for item in affected if item], 
-                "module": "system.linux_users"
-            }
+            metadata=metadata
         )
         result.details.setdefault("changes", dict(changes))
         result.details.setdefault("status_final", "simulated" if result.dry_run else ("applied" if result.ok else "failed"))
