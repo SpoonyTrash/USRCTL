@@ -23,9 +23,10 @@ from utils.errors import (
     UserAlreadyExistsError,
     UserNotFoundError, 
     ResourceNotFoundError,
-    ValidationError
+    ValidationError,
+    GroupMembershipError,   
 )
-from utils.validators import validate_username
+from utils.validators import validate_username, validate_groupname
 
 CMD_USERADD = "useradd"
 CMD_USERMOD = "usermod"
@@ -45,7 +46,7 @@ ADMIN_GROUPS = frozenset({"sudo", "wheel", "admin", "adm"})
 PROTECTED_USERS = frozenset({"root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail", "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody"})
 PASSWD_FIELDS = ("username", "password", "uid", "gid", "gecos", "home", "shell")
 NORMAL_USER_MIN_UID = 1000
-REQUIRED_COMMANDS = (CMD_USERADD, CMD_USERMOD, CMD_USERDEL, CMD_ID, CMD_GETENT)
+REQUIRED_COMMANDS = (CMD_USERADD, CMD_USERMOD, CMD_USERDEL, CMD_ID, CMD_GETENT, CMD_PASSWD)
 
 def _normalize_username(username: str, *, allow_reserved: bool = True) -> str:
     return validate_username(str(username).strip(), allow_reserved=allow_reserved) 
@@ -54,8 +55,18 @@ def _normalize_home(home: str | Path | None) -> str | None:
     if home is None:
         return None
     text = str(home).strip()
-    return str(Path(text)) if text else None
+    if not text:
+        return None
 
+    path = Path(text)
+
+    if not path.is_absolute():
+        raise HomeDirectoryError(
+            "Home directory must be an absolute path.",
+            details={"home": text},
+        )
+
+    return str(path)
 def _normalize_shell(shell: str | Path | None) -> str | None:
     if shell is None:
         return None
@@ -71,13 +82,46 @@ def _normalize_groups(groups: Sequence[str] | str | None) -> list[str]:
         return []
     raw = groups.split(",") if isinstance(groups, str) else groups
     seen: set[str] = set()
+
     normalized: list[str] = []
+    
     for item in raw:
-        group = str(item).strip()
-        if group and group not in seen:
+        try:
+            group = validate_groupname(str(item).strip(), allow_reserved=True)
+        except GroupMembershipError as exc:
+            raise ValidationError(
+                "Group name format is invalid.",
+                details=exc.details,
+                cause=exc,
+            ) from exc
+
+        if group not in seen:
             seen.add(group)
             normalized.append(group)
+
     return normalized
+
+def _validate_uid(uid: Any) -> int:
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
+        raise InvalidUidError(
+            "UID must be a non-negative integer.",
+            details={"uid": uid},
+        )
+    return uid
+
+def _normalize_gecos(gecos: Any) -> str:
+    text = str(gecos).strip()
+
+    if not text:
+        raise ValidationError("GECOS cannot be empty.")
+
+    if ":" in text or "\n" in text or "\r" in text:
+        raise ValidationError(
+            "GECOS cannot contain ':' or line breaks.",
+            details={"gecos": text},
+        )
+
+    return text
 
 def _parse_passwd_line(line: str) -> dict[str, Any]:
     parts = line.rstrip("\n").split(":")
@@ -112,14 +156,11 @@ def _parse_id_output(output: str) -> dict[str, Any]:
             payload["groups"] = _normalize_groups(groups)
     return payload
 
-def _parse_groups_output(output: str, username: str | None = None) -> list[str]:
+def _parse_groups_output(output: str, *, colon_format: bool = False) -> list[str]:
     text = output.strip()
-    if ":" in text:
+    if colon_format and ":" in text:        
         text = text.split(":", 1)[1]
-    parts = text.split()
-    if username and parts and parts[0] == username:
-        parts = parts[1:]
-    return _normalize_groups(parts)
+    return _normalize_groups(text.split())
 
 def _user_type_for_uid(uid: int | None, groups: Sequence[str]) -> UserType:
     if uid == 0:
@@ -167,7 +208,7 @@ def _build_usermod_command(username: str, **changes: Any) -> list[str]:
     if changes.get("shell") is not None:
         command.extend(["--shell", str(changes["shell"])])
     if changes.get("gecos") is not None:
-        command.extend(["--comment", str(changes["gecos"])])
+        command.extend(["--comment", _normalize_gecos(changes["gecos"])])
     if changes.get("groups") is not None:
         command.extend(["--groups", ",".join(_normalize_groups(changes["groups"]))])
     if changes.get("append_groups"):
@@ -201,12 +242,12 @@ class LinuxUserManager:
 
     def user_exists(self, username: str) -> bool:
         username = _normalize_username(username)
-        result = self.executor.execute(_build_getent_passwd_command(username), action="query_user", target=username)
+        result = self._execute_query(_build_getent_passwd_command(username), action="query_user", target=username)
         return result.ok
 
     def get_user(self, username: str, *, include_groups: bool = True, include_status: bool = True) -> SystemUser:
         username = _normalize_username(username)
-        result = self.executor.execute(_build_getent_passwd_command(username), action="query_user", target=username)
+        result = self._execute_query(_build_getent_passwd_command(username), action="query_user", target=username)
         if not result.ok:
             self._raise_user_not_found(username, result)
         user = self._user_from_passwd(_parse_getent_passwd(result.execution.stdout if result.execution else ""))
@@ -222,7 +263,8 @@ class LinuxUserManager:
     def get_user_by_uid(self, uid: int) -> SystemUser:
         if not isinstance(uid, int) or uid < 0:
             raise InvalidUidError("UID must be a non-negative integer.", details={"uid": uid})
-        result = self.executor.execute(_build_getent_passwd_command(uid), action="query_user", target=str(uid))
+        uid = _validate_uid(uid)
+        result = self._execute_query(_build_getent_passwd_command(uid), action="query_user", target=str(uid))
         if not result.ok:
             raise UserNotFoundError("User with UID not found.", details={"uid": uid})
         return self._mark_privileges(self._user_from_passwd(_parse_getent_passwd(result.execution.stdout if result.execution else "")))
@@ -232,23 +274,40 @@ class LinuxUserManager:
         user.metadata.update({"source": str(self.passwd_path), "passwd_fields": PASSWD_FIELDS})
         return user
     
-    def list_users(self) -> list[SystemUser]:
-        result = self.executor.execute(_build_getent_passwd_command(), action="query_user", target="all")
+    def list_users(
+        self,
+        *,
+        include_groups: bool = True,
+        include_status: bool = False,
+    ) -> list[SystemUser]:
+        result = self._execute_query(_build_getent_passwd_command(), action="query_user", target="all")
         if not result.ok:
             self._raise_from_result(result, default_message="Unable to list system users.")
         users = []
         for line in (result.execution.stdout if result.execution else "").splitlines():
             if line.strip():
-                users.append(self._mark_privileges(self._user_from_passwd(_parse_passwd_line(line))))
+                user = self._user_from_passwd(_parse_passwd_line(line))
+
+                if include_groups:
+                    user.groups = self.get_user_groups(user.username)
+
+                if include_status:
+                    locked = self.is_user_locked(user.username)
+                    user.account_locked = locked
+                    user.status = AccountStatus.LOCKED if locked else AccountStatus.ACTIVE
+                    user.password_status = PasswordStatus.LOCKED if locked else PasswordStatus.UNKNOWN
+
+                users.append(self._mark_privileges(user))        
         return users
 
     def list_normal_users(self) -> list[SystemUser]:
-        return [user for user in self.list_users() if not user.is_system_user]
+        return [user for user in self.list_users(include_groups=True) if not user.is_system_user]
 
     def list_system_users(self) -> list[SystemUser]:
-        return [user for user in self.list_users() if user.is_system_user]
-    
+        return [user for user in self.list_users(include_groups=True) if user.is_system_user]
+
     def get_user_details(self, username: str) -> SystemUser:
+        username = _normalize_username(username)
         return self.get_user(username, include_groups=True, include_status=True)
 
     def list_user_summaries(self) -> list[UserSummary]:
@@ -264,12 +323,15 @@ class LinuxUserManager:
         groups: Sequence[str] | None = None, 
         create_home: bool = True, 
         dry_run: bool | None = None
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
+        username = _normalize_username(username, allow_reserved=False)
+        normalized_shell = _normalize_shell(shell) or "/bin/sh"
+        self.ensure_shell_installed(normalized_shell)
         spec = UserCreateSpec(
             username=username, 
             uid=uid, 
             home=_normalize_home(home), 
-            shell=_normalize_shell(shell) or "/bin/sh", 
+            shell=_normalize_shell,
             groups=_normalize_groups(groups), 
             create_home=create_home
         )
@@ -280,7 +342,8 @@ class LinuxUserManager:
         spec: UserCreateSpec, 
         *, 
         dry_run: bool | None = None
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
+        spec.username = _normalize_username(spec.username, allow_reserved=False)        
         self.ensure_user_absent(spec.username)
         if spec.uid is not None:
             self.ensure_uid_available(spec.uid)
@@ -312,7 +375,7 @@ class LinuxUserManager:
         remove_home: bool = False, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:        
         username = _normalize_username(username)
         self.ensure_user_exists(username)
         self.ensure_not_protected_user(username, operation="delete_user", allow_protected=allow_protected)
@@ -338,10 +401,10 @@ class LinuxUserManager:
             impact=ImpactLevel.CRITICAL if remove_home else ImpactLevel.HIGH
         )
 
-    def delete_user_only(self, username: str, *, dry_run: bool | None = None) -> CommandResult | DryRunResult:
+    def delete_user_only(self, username: str, *, dry_run: bool | None = None) -> SystemResult:        
         return self.delete_user(username, remove_home=False, dry_run=dry_run)
 
-    def delete_user_and_home(self, username: str, *, dry_run: bool | None = None) -> CommandResult | DryRunResult:
+    def delete_user_and_home(self, username: str, *, dry_run: bool | None = None) -> SystemResult:
         return self.delete_user(username, remove_home=True, dry_run=dry_run)
     
     def modify_user(
@@ -351,7 +414,7 @@ class LinuxUserManager:
         move_home: bool = False, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:        
         spec.username = _normalize_username(spec.username)
         self.ensure_not_protected_user(spec.username, operation="modify_user", allow_protected=allow_protected)
         self.ensure_user_exists(spec.username)
@@ -391,7 +454,7 @@ class LinuxUserManager:
         uid: int, *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:        
         username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="change_uid", allow_protected=allow_protected)
         self.ensure_user_exists(username)
@@ -415,7 +478,7 @@ class LinuxUserManager:
         move_home: bool = False, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         username = _normalize_username(username)
         home = _normalize_home(home) or ""
         if not home:
@@ -443,7 +506,7 @@ class LinuxUserManager:
         *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         username = _normalize_username(username)
         shell = _normalize_shell(shell) or ""
         self.ensure_user_exists(username)
@@ -467,7 +530,7 @@ class LinuxUserManager:
         *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         username = _normalize_username(username)
         self.ensure_user_exists(username)
         self.ensure_not_protected_user(username, operation="change_gecos", allow_protected=allow_protected)
@@ -489,7 +552,8 @@ class LinuxUserManager:
         *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
+        username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="replace_user_groups", allow_protected=allow_protected)
         return self.assign_secondary_groups(
             username, 
@@ -506,7 +570,8 @@ class LinuxUserManager:
         *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
+        username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="add_user_to_groups", allow_protected=allow_protected)
         return self.assign_secondary_groups(
             username, 
@@ -523,27 +588,40 @@ class LinuxUserManager:
         *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="remove_user_from_groups", allow_protected=allow_protected)
         remove = set(_normalize_groups(groups))
+        if not remove:
+            return self._skipped_result(
+                "remove_user_from_groups",
+                username,
+                "No groups requested for removal.",
+            )
         current = self.get_secondary_groups(username)
         remaining = [group for group in current if group not in remove]
-        return self.assign_secondary_groups(
-            username, 
-            remaining, 
-            append=False, 
-            dry_run=dry_run, 
-            allow_protected=allow_protected
+        self.ensure_user_exists(username)
+        return self._execute_user_command(
+            _build_usermod_command(username, groups=remaining),
+            action="remove_user_from_groups",
+            username=username,
+            dry_run=dry_run,
+            changes={
+                "removed_groups": sorted(remove),
+                "remaining_groups": remaining,
+            },
+            warnings=self.warn_if_protected_user(username),
+            affected=[username, *sorted(remove), *remaining],
+            impact=ImpactLevel.MEDIUM,
         )
-    
+
     def lock_user(
         self, 
         username: str, 
         *, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="lock_user", allow_protected=allow_protected)
         self.ensure_user_exists(username)
@@ -563,8 +641,8 @@ class LinuxUserManager:
         username: str, 
         *, 
         dry_run: bool | None = None,
-        allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+        allow_protected: bool = False,
+    ) -> SystemResult:
         username = _normalize_username(username)
         self.ensure_not_protected_user(username, operation="unlock_user", allow_protected=allow_protected)
         self.ensure_user_exists(username)
@@ -579,16 +657,39 @@ class LinuxUserManager:
             impact=ImpactLevel.HIGH
         )
 
-    def is_user_locked(self, username: str) -> bool:
+    def get_password_lock_status(self, username: str) -> PasswordStatus:
         username = _normalize_username(username)
-        result = self.executor.execute([CMD_PASSWD, "--status", username], action="query_user", target=username)
+        result = self._execute_query(
+            [CMD_PASSWD, "--status", username],
+            action="query_user_lock_status",
+            target=username,
+        )
         if not result.ok:
-            return False
+            return PasswordStatus.UNKNOWN        
         stdout = result.execution.stdout.strip() if result.execution else ""
         parts = stdout.split()
-        return len(parts) > 1 and parts[1] in {"L", "LK", "NP"}
 
+        if len(parts) <= 1:
+            return PasswordStatus.UNKNOWN
+
+        if parts[1] in {"L", "LK"}:
+            return PasswordStatus.LOCKED
+
+        if parts[1] == "NP":
+            return PasswordStatus.NO_PASSWORD
+
+        if parts[1] in {"P", "PS"}:
+            return PasswordStatus.SET
+
+        return PasswordStatus.UNKNOWN
+
+    def is_user_locked(self, username: str) -> bool:
+        username = _normalize_username(username)
+        return self.get_password_lock_status(username) == PasswordStatus.LOCKED
+
+   #CONTINUAR CORRECCION AQUI 
     def has_non_interactive_shell(self, username: str) -> bool:
+        username = _normalize_username(username)
         return (self.get_user(
             username, 
             include_groups=False, 
@@ -597,15 +698,19 @@ class LinuxUserManager:
 
     def get_user_groups(self, username: str) -> list[str]:
         username = _normalize_username(username)
-        result = self.executor.execute([CMD_ID, "-nG", username], action="query_user", target=username)
+        result = self._execute_query([CMD_ID, "-nG", username], action="query_user", target=username)
         if not result.ok:
             self._raise_user_not_found(username, result)
-        return _parse_groups_output(result.execution.stdout if result.execution else "", username=username)
-    
+        return _parse_groups_output(
+            result.execution.stdout if result.execution else "",
+            colon_format=False,
+        )    
     def get_primary_group(self, username: str) -> int | None:
+        username = _normalize_username(username)
         return self.get_user(username, include_groups=False, include_status=False).gid
 
     def get_secondary_groups(self, username: str) -> list[str]:
+        username = _normalize_username(username)
         user = self.get_user(
             username, 
             include_groups=False, 
@@ -623,7 +728,7 @@ class LinuxUserManager:
         append: bool = False, 
         dry_run: bool | None = None,
         allow_protected: bool = False
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         username = _normalize_username(username)
         self.ensure_user_exists(username)
         normalized = _normalize_groups(groups)
@@ -632,7 +737,7 @@ class LinuxUserManager:
             groups=normalized, 
             append_groups=append
         )
-        self.ensure_not_protected_user(username, operation="assign_user_groups", allow_protected=allow_protected)
+        self.ensure_not_protected_user(username, operation="assign_secondary_groups", allow_protected=allow_protected)
         return self._execute_user_command(
             command, 
             action="assign_user_groups", 
@@ -645,8 +750,10 @@ class LinuxUserManager:
         )
     
     def user_in_group(self, username: str, group: str) -> bool:
-        return str(group).strip() in self.get_user_groups(username)
-
+        username = _normalize_username(username)
+        group = validate_groupname(str(group).strip(), allow_reserved=True)
+        return group in self.get_user_groups(username)
+    
     def is_root_user(self, user: str | SystemUser) -> bool:
         if isinstance(user, SystemUser):
             return user.is_root
@@ -658,12 +765,15 @@ class LinuxUserManager:
         ).uid == 0
 
     def is_sudo_user(self, username: str) -> bool:
+        username = _normalize_username(username)
         return self.user_in_group(username, "sudo")
     
     def is_wheel_user(self, username: str) -> bool:
+        username = _normalize_username(username)
         return self.user_in_group(username, "wheel")
 
     def has_admin_privileges(self, username: str, *, admin_groups: Sequence[str] | None = None) -> bool:
+        username = _normalize_username(username)
         user = self.get_user(username, include_groups=True, include_status=False)
         groups = set(user.groups)
         return user.is_root or bool(groups.intersection(set(admin_groups or ADMIN_GROUPS)))
@@ -672,8 +782,15 @@ class LinuxUserManager:
         return self._mark_privileges(user)
     
     def check_required_commands(self) -> dict[str, bool]:
-        return {binary: self.executor.check_dependency(binary).ok for binary in REQUIRED_COMMANDS}
-
+        return {
+            binary: self._execute_query(
+                ["command", "-v", binary],
+                action="check_dependency",
+                target=binary,
+            ).ok
+            for binary in REQUIRED_COMMANDS
+        }
+    
     def ensure_user_absent(self, username: str) -> None:
         username = _normalize_username(username, allow_reserved=False)
         if self.user_exists(username):
@@ -685,9 +802,8 @@ class LinuxUserManager:
             raise UserNotFoundError("User not found.", details={"username": username})
 
     def ensure_uid_available(self, uid: int) -> None:
-        if not isinstance(uid, int) or uid < 0:
-            raise InvalidUidError("UID must be a non-negative integer.", details={"uid": uid})
-        result = self.executor.execute(_build_getent_passwd_command(uid), action="query_user", target=str(uid))
+        uid = _validate_uid(uid)
+        result = self._execute_query(_build_getent_passwd_command(uid), action="query_user", target=str(uid))
         if result.ok:
             raise InvalidUidError("UID is already in use.", details={"uid": uid})
     
@@ -725,10 +841,24 @@ class LinuxUserManager:
             )
 
     def warn_if_protected_user(self, username: str) -> list[str]:
-        username = str(username).strip()
+        username = _normalize_username(username)
         if username in PROTECTED_USERS:
             return [f"'{username}' is a protected or critical system account."]
         return []
+    
+    def _execute_query(
+        self,
+        command: list[str],
+        *,
+        action: str,
+        target: str,
+    ) -> SystemResult:
+        return self.executor.execute(
+            command,
+            action=action,
+            target=target,
+            dry_run=False,
+        )
 
 
 
@@ -743,7 +873,7 @@ class LinuxUserManager:
     def _raise_user_not_found(self, username: str, result: SystemResult | None = None) -> None:
         raise UserNotFoundError("User not found.", details={"username": username, "result": result.to_log_record() if result else None})
 
-    def _translate_mutation_failure(self, result: CommandResult | DryRunResult, username: str) -> None:
+    def _translate_mutation_failure(self, result: SystemResult, username: str) -> None:
         if result.ok or isinstance(result, DryRunResult):
             return
         stderr = (result.execution.stderr if result.execution else "").lower()
@@ -774,7 +904,7 @@ class LinuxUserManager:
         warnings: Sequence[str], 
         affected: Sequence[str | None], 
         impact: ImpactLevel
-    ) -> CommandResult | DryRunResult:
+    ) -> SystemResult:
         result = self.executor.execute(
             command, 
             action=action, 
@@ -850,7 +980,7 @@ class LinuxUserManager:
     def _group_name_by_gid(self, gid: int | None) -> str | None:
         if gid is None:
             return None
-        result = self.executor.execute([CMD_GETENT, "group", str(gid)], action="query_user", target=str(gid))
+        result = self._execute_query([CMD_GETENT, "group", str(gid)], action="query_user", target=str(gid))
         if not result.ok or not result.execution.stdout.strip():
             return None
         return result.execution.stdout.split(":", 1)[0].strip() or None

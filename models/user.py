@@ -14,6 +14,7 @@ NORMAL_USER_MIN_UID = 1000
 class AccountStatus(str, Enum):
     ACTIVE = "active"
     LOCKED = "locked"
+    NO_PASSWORD = "no_password"
     EXPIRED = "expired"
     INACTIVE = "inactive"
     UNKNOWN = "unknown"
