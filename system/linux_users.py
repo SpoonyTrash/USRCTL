@@ -370,6 +370,11 @@ class LinuxUserManager:
         dry_run: bool | None = None
     ) -> SystemResult:
         username = _normalize_username(username, allow_reserved=False)
+        create_home = _coerce_bool(
+            create_home,
+            field_name="create_home",
+            default=True,
+        )
         uid = None if uid is None else _validate_uid(uid)
         normalized_shell = _normalize_shell(shell) or "/bin/sh"
         self.ensure_shell_installed(normalized_shell)
@@ -397,11 +402,16 @@ class LinuxUserManager:
             home=_normalize_home(spec.home),
             shell=normalized_shell,
             groups=_normalize_groups(spec.groups),
-            create_home=spec.create_home,
-        )
+            create_home=_coerce_bool(
+                spec.create_home,
+                field_name="create_home",
+                default=True,
+            ),        )
         self.ensure_user_absent(normalized_spec.username)
         if normalized_spec.uid is not None:
             self.ensure_uid_available(normalized_spec.uid)
+        if normalized_spec.gid is not None:
+            self.ensure_gid_exists(normalized_spec.gid)
         self.ensure_shell_installed(normalized_shell)
         command = _build_useradd_command(normalized_spec)
         warnings = self.warn_if_protected_user(normalized_spec.username)
@@ -431,6 +441,11 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:        
         username = _normalize_username(username)
+        remove_home = _coerce_bool(
+            remove_home,
+            field_name="remove_home",
+            default=False,
+        )
         allow_protected = _coerce_bool(
             allow_protected,
             field_name="allow_protected",
@@ -499,6 +514,11 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:        
         username = _normalize_username(spec.username)
+        move_home = _coerce_bool(
+            move_home,
+            field_name="move_home",
+            default=False,
+        )
         allow_protected = _coerce_bool(
             allow_protected,
             field_name="allow_protected",
@@ -516,7 +536,7 @@ class LinuxUserManager:
             home=new_home, 
             move_home=move_home, 
             shell=new_shell, 
-            groups=spec.groups
+            groups=groups
         )
         if command == [CMD_USERMOD, username]:
             return self._skipped_result(
@@ -581,6 +601,11 @@ class LinuxUserManager:
     ) -> SystemResult:
         username = _normalize_username(username)
         home = _normalize_home(home) or ""
+        move_home = _coerce_bool(
+            move_home,
+            field_name="move_home",
+            default=False,
+        )
         if not home:
             raise HomeDirectoryError("Home directory path cannot be empty.")
         allow_protected = _coerce_bool(
@@ -669,6 +694,11 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="replace_user_groups", allow_protected=allow_protected)
         return self.assign_secondary_groups(
             username, 
@@ -687,6 +717,11 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="add_user_to_groups", allow_protected=allow_protected)
         return self.assign_secondary_groups(
             username, 
@@ -705,6 +740,11 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="remove_user_from_groups", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         remove = set(_normalize_groups(groups))
@@ -721,10 +761,13 @@ class LinuxUserManager:
             action="remove_user_from_groups",
             username=username,
             dry_run=dry_run,
-            changes={
-                "removed_groups": sorted(remove),
-                "remaining_groups": remaining,
-            },
+            changes=self._with_allow_protected_audit(
+                {
+                    "removed_groups": sorted(remove),
+                    "remaining_groups": remaining,
+                },
+                allow_protected=allow_protected,
+            ),
             warnings=self.warn_if_protected_user(username),
             affected=[username, *sorted(remove), *remaining],
             impact=ImpactLevel.MEDIUM,
@@ -738,6 +781,11 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="lock_user", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         return self._execute_user_command(
@@ -745,8 +793,10 @@ class LinuxUserManager:
             action="lock_user", 
             username=username, 
             dry_run=dry_run, 
-            changes={"locked": True}, 
-            warnings=self.warn_if_protected_user(username), 
+            changes=self._with_allow_protected_audit(
+                {"locked": True},
+                allow_protected=allow_protected,
+            ),            warnings=self.warn_if_protected_user(username), 
             affected=[username], 
             impact=ImpactLevel.HIGH
         )
@@ -759,6 +809,11 @@ class LinuxUserManager:
         allow_protected: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(username, operation="unlock_user", allow_protected=allow_protected)
         self.ensure_user_exists(username)
         return self._execute_user_command(
@@ -766,8 +821,10 @@ class LinuxUserManager:
             action="unlock_user", 
             username=username, 
             dry_run=dry_run, 
-            changes={"locked": False}, 
-            warnings=self.warn_if_protected_user(username), 
+            changes=self._with_allow_protected_audit(
+                {"locked": False},
+                allow_protected=allow_protected,
+            ),            warnings=self.warn_if_protected_user(username), 
             affected=[username], 
             impact=ImpactLevel.HIGH
         )
@@ -844,6 +901,16 @@ class LinuxUserManager:
         allow_protected: bool = False
     ) -> SystemResult:
         username = _normalize_username(username)
+        append = _coerce_bool(
+            append,
+            field_name="append",
+            default=False,
+        )
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
         self.ensure_not_protected_user(
             username,
             operation="assign_secondary_groups",
@@ -862,14 +929,15 @@ class LinuxUserManager:
             groups=normalized, 
             append_groups=append
         )
-        self.ensure_not_protected_user(username, operation="assign_secondary_groups", allow_protected=allow_protected)
         return self._execute_user_command(
             command, 
             action="assign_user_groups", 
             username=username, 
             dry_run=dry_run, 
-            changes={"groups": normalized, "append": append}, 
-            warnings=self.warn_if_protected_user(username), 
+            changes=self._with_allow_protected_audit(
+                {"groups": normalized, "append": append},
+                allow_protected=allow_protected,
+            ),            warnings=self.warn_if_protected_user(username), 
             affected=[username, *normalized], 
             impact=ImpactLevel.MEDIUM
         )
@@ -930,6 +998,19 @@ class LinuxUserManager:
         result = self._execute_query(_build_getent_passwd_command(uid), action="query_user", target=str(uid))
         if result.ok:
             raise InvalidUidError("UID is already in use.", details={"uid": uid})
+        
+    def ensure_gid_exists(self, gid: int) -> None:
+        gid = _validate_gid(gid)
+        result = self._execute_query(
+            [CMD_GETENT, "group", str(gid)],
+            action="query_group",
+            target=str(gid),
+        )
+        if not result.ok:
+            raise ValidationError(
+                "GID does not exist.",
+                details={"gid": gid},
+            )
     
     def ensure_shell_installed(self, shell: str) -> None:
         shell = _normalize_shell(shell) or ""
