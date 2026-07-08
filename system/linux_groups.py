@@ -73,7 +73,47 @@ def _normalize_groupname(groupname: str, *, allow_reserved: bool = True) -> str:
 def _normalize_username(username: str) -> str:
     return validate_username(str(username).strip(), allow_reserved=True)
 
+def _coerce_bool(value: Any, *, field_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise GroupMembershipError(
+            f"{field_name} must be a boolean-like value.",
+            details={field_name: value},
+        )
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+
+        if normalized in {"false", "no", "n", "0"}:
+            return False
+
+        raise GroupMembershipError(
+            f"{field_name} must be one of: true/false, yes/no, 1/0.",
+            details={field_name: value},
+        )
+
+    raise GroupMembershipError(
+        f"{field_name} must be a boolean-like value.",
+        details={field_name: value},
+    )
+
 def _normalize_gid(gid: Any, *, allow_system_gid: bool = True) -> int:
+    if isinstance(gid, bool):
+        raise InvalidGidError(
+            "GID must be an integer, not boolean.",
+            details={"gid": gid},
+        )
+    
     if allow_system_gid:
         try:
             value = int(gid)
@@ -317,6 +357,11 @@ class LinuxGroupManager:
         members: Sequence[str] | None = None, 
         dry_run: bool | None = None
     ) -> SystemResult:
+        system = _coerce_bool(
+            system,
+            field_name="system",
+            default=False,
+        )
         spec = GroupCreateSpec.advanced(
             groupname, 
             gid=gid, 
@@ -331,53 +376,108 @@ class LinuxGroupManager:
         *, 
         dry_run: bool | None = None
     ) -> SystemResult:
+        groupname = _normalize_groupname(spec.groupname, allow_reserved=False)
+        gid = None if spec.gid is None else _normalize_gid(spec.gid, allow_system_gid=True)
+        system = spec.group_type == GroupType.SYSTEM
+
+        self.ensure_group_absent(groupname)
+
+        if gid is not None:
+            self.ensure_gid_available(gid)
+
         warnings = self._security_warnings(
-            spec.groupname, 
-            spec.gid, 
+            groupname, 
+            gid, 
             operation="create"
         )
         command = _build_groupadd_command(
-            spec.groupname, 
-            gid=spec.gid, 
-            system=spec.group_type == GroupType.SYSTEM
+            groupname, 
+            gid=gid, 
+            system=system
         )
         result = self._execute_mutation(
             command, 
             action=ACTION_CREATE_GROUP, 
-            target=spec.groupname, 
+            target=groupname,             
             warnings=warnings, 
             dry_run=dry_run
         )
         if result.ok and not result.dry_run and spec.members:
-            member_results = [self.add_user_to_group(member, spec.groupname, dry_run=dry_run).summary() for member in spec.members]
+            member_results = [self.add_user_to_group(member, groupname, dry_run=dry_run).summary() for member in spec.members]            
             result.details["initial_member_results"] = member_results
         return result
     
     def delete_group(
-        self, 
-        groupname: str, 
-        *, 
-        dry_run: bool | None = None
+        self,
+        groupname: str,
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
+        allow_non_empty: bool = False,
+        allow_primary_group: bool = False,
     ) -> SystemResult:
         groupname = _normalize_groupname(groupname, allow_reserved=True)
+        allow_non_empty = _coerce_bool(
+            allow_non_empty,
+            field_name="allow_non_empty",
+            default=False,
+        )
+        allow_primary_group = _coerce_bool(
+            allow_primary_group,
+            field_name="allow_primary_group",
+            default=False,
+        )
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+
+        group = self.get_group(groupname)
+        self.ensure_not_protected_group(
+            group.groupname,
+            group.gid,
+            operation="delete_group",
+            allow_protected=allow_protected,
+        )
+        primary_members = (
+            self.get_primary_members_for_group(group.gid)
+            if group.gid is not None
+            else []
+        )
+
+        if group.members and not allow_non_empty:
+            raise GroupMembershipError(
+                "Cannot delete group with explicit members.",
+                details={
+                    "groupname": groupname,
+                    "members": group.members,
+                    "allow_non_empty_required": True,
+                },
+            )
+
+        if primary_members and not allow_primary_group:
+            raise GroupMembershipError(
+                "Cannot delete group used as primary group.",
+                details={
+                    "groupname": groupname,
+                    "primary_members": primary_members,
+                    "allow_primary_group_required": True,
+                },
+            )
         warnings = self._security_warnings(
-            groupname, 
-            None, 
+            group.groupname,
+            group.gid,
             operation="delete"
         )
-        if self.group_exists(groupname):
-            group = self.get_group(groupname)
-            if group.members:
-                warnings.append("Group has explicit members.")
-            if group.gid is not None and self.get_primary_members_for_group(group.gid):
-                warnings.append("Group is used as a primary group by one or more users.")
-        command = _build_groupdel_command(groupname)
+        command = _build_groupdel_command(group.groupname)        
         return self._execute_mutation(
-            command, 
-            action=ACTION_DELETE_GROUP, 
-            target=groupname, 
-            warnings=warnings, 
-            dry_run=dry_run
+            command,
+            action=ACTION_DELETE_GROUP,
+            target=group.groupname,
+            warnings=warnings,
+            dry_run=dry_run,
+            metadata=self._with_allow_protected_audit({}, allow_protected=allow_protected),
         )
     
     def group_has_members(self, groupname: str) -> bool:
@@ -388,24 +488,67 @@ class LinuxGroupManager:
         return bool(group.gid is not None and self.get_primary_members_for_group(group.gid))
     
     def rename_group(
-        self, 
-        groupname: str, 
-        new_groupname: str, 
-        *, 
-        dry_run: bool | None = None
+        self,
+        groupname: str,
+        new_groupname: str,
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False
     ) -> SystemResult:
-        command = _build_groupmod_command(groupname, new_groupname=new_groupname)
-        warnings = self._security_warnings(groupname, None, operation="rename")
-        return self._execute_mutation(command, action=ACTION_RENAME_GROUP, target=groupname, warnings=warnings, dry_run=dry_run)
+        groupname = _normalize_groupname(groupname, allow_reserved=True)
+        new_groupname = _normalize_groupname(new_groupname, allow_reserved=False)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+
+        group = self.get_group(groupname)
+        self.ensure_not_protected_group(
+            group.groupname,
+            group.gid,
+            operation="rename_group",
+            allow_protected=allow_protected,
+        )
+        self.ensure_group_absent(new_groupname)
+
+        command = _build_groupmod_command(group.groupname, new_groupname=new_groupname)
+        warnings = self._security_warnings(group.groupname, group.gid, operation="rename")
+        return self._execute_mutation(
+            command,
+            action=ACTION_RENAME_GROUP,
+            target=group.groupname,
+            warnings=warnings,
+            dry_run=dry_run,
+            metadata=self._with_allow_protected_audit({"new_groupname": new_groupname}, allow_protected=allow_protected),
+        )
     
     def change_gid(
         self, 
         groupname: str, 
         new_gid: int, 
         *, 
-        dry_run: bool | None = None
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
     ) -> SystemResult:
+        groupname = _normalize_groupname(groupname, allow_reserved=True)
+        new_gid = _normalize_gid(new_gid, allow_system_gid=True)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+
         group = self.get_group(groupname)
+
+        self.ensure_not_protected_group(
+            group.groupname,
+            group.gid,
+            operation="change_gid",
+            allow_protected=allow_protected,
+        )
+
+        self.ensure_gid_available(new_gid)
         warnings = self._security_warnings(
             group.groupname, 
             group.gid, 
@@ -414,11 +557,12 @@ class LinuxGroupManager:
         warnings.append("Changing a GID may leave existing filesystem ownership pointing to the old numeric GID.")
         command = _build_groupmod_command(group.groupname, new_gid=new_gid)
         return self._execute_mutation(
-            command, 
-            action=ACTION_CHANGE_GROUP_GID, 
-            target=group.groupname, 
-            warnings=warnings, 
-            dry_run=dry_run
+            command,
+            action=ACTION_CHANGE_GROUP_GID,
+            target=group.groupname,
+            warnings=warnings,
+            dry_run=dry_run,
+            metadata=self._with_allow_protected_audit({"new_gid": new_gid}, allow_protected=allow_protected),
         )
 
     def modify_group_from_spec(self, spec: GroupUpdateSpec, *, dry_run: bool | None = None) -> list[SystemResult]:
@@ -438,45 +582,81 @@ class LinuxGroupManager:
         return results
 
     def add_user_to_group(
-        self, 
-        username: str, 
-        groupname: str, 
-        *, 
-        dry_run: bool | None = None
+        self,
+        username: str,
+        groupname: str,
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
         groupname = _normalize_groupname(groupname, allow_reserved=True)
-        if self.is_user_in_group(username, groupname):
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+
+        self.ensure_user_exists(username)
+        group = self.get_group(groupname)
+
+        self.ensure_not_protected_group(
+            group.groupname,
+            group.gid,
+            operation="add_user_to_group",
+            allow_protected=allow_protected,
+        )
+
+        if groupname in self.get_groups_for_user(username):            
             raise UserAlreadyInGroupError("User already belongs to group.", details={"username": username, "groupname": groupname})
-        warnings = self._security_warnings(groupname, None, operation="add_member")
+        warnings = self._security_warnings(group.groupname, group.gid, operation="add_member")        
         return self._execute_mutation(
-            _build_add_member_command(groupname, username), 
-            action=ACTION_ADD_USER_TO_GROUP, 
-            target=groupname, 
-            user=username, 
-            warnings=warnings, 
-            dry_run=dry_run
+            _build_add_member_command(group.groupname, username),
+            action=ACTION_ADD_USER_TO_GROUP,
+            target=group.groupname,
+            user=username,
+            warnings=warnings,
+            dry_run=dry_run,
+            metadata=self._with_allow_protected_audit({}, allow_protected=allow_protected),
         )
     
     def remove_user_from_group(
-        self, 
-        username: str, 
-        groupname: str, 
-        *, 
-        dry_run: bool | None = None
+        self,
+        username: str,
+        groupname: str,
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
         groupname = _normalize_groupname(groupname, allow_reserved=True)
-        if not self.is_user_in_group(username, groupname):
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+
+        self.ensure_user_exists(username)
+        group = self.get_group(groupname)
+
+        self.ensure_not_protected_group(
+            group.groupname,
+            group.gid,
+            operation="remove_user_from_group",
+            allow_protected=allow_protected,
+        )
+
+        if groupname not in self.get_groups_for_user(username):            
             raise UserNotInGroupError("User does not belong to group.", details={"username": username, "groupname": groupname})
-        warnings = self._security_warnings(groupname, None, operation="remove_member")
+        warnings = self._security_warnings(group.groupname, group.gid, operation="remove_member")
         return self._execute_mutation(
-            _build_remove_member_command(groupname, username), 
-            action=ACTION_REMOVE_USER_FROM_GROUP, 
-            target=groupname, 
-            user=username, 
-            warnings=warnings, 
-            dry_run=dry_run
+            _build_remove_member_command(group.groupname, username),
+            action=ACTION_REMOVE_USER_FROM_GROUP,
+            target=group.groupname,
+            user=username,
+            warnings=warnings,
+            dry_run=dry_run,
+            metadata=self._with_allow_protected_audit({}, allow_protected=allow_protected),
         ) 
     
     def is_user_in_group(self, username: str, groupname: str) -> bool:
@@ -501,50 +681,115 @@ class LinuxGroupManager:
             )
         return _parse_id_groups_output(result.execution.stdout)
     
-    def replace_group_members(self, groupname: str, members: Sequence[str], *, dry_run: bool | None = None) -> SystemResult:
+    def replace_group_members(
+        self,
+        groupname: str,
+        members: Sequence[str],
+        *,
+        dry_run: bool | None = None,
+        allow_protected: bool = False,
+    ) -> SystemResult:        
         groupname = _normalize_groupname(groupname, allow_reserved=True)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+        group = self.get_group(groupname)
+
+        self.ensure_not_protected_group(
+            group.groupname,
+            group.gid,
+            operation="replace_group_members",
+            allow_protected=allow_protected,
+        )
         desired = set(_normalize_members(members))
-        current = set(self.get_group_members(groupname))
+        current = set(group.members)        
         to_add = sorted(desired - current)
         to_remove = sorted(current - desired)
-        warnings = self._security_warnings(groupname, None, operation="replace_members")
+        warnings = self._security_warnings(group.groupname, group.gid, operation="replace_members")
         warnings.append("Replacing group members may remove existing access; primary memberships are not changed.")
-        if dry_run if dry_run is not None else self.dry_run:
+        effective_dry_run = _coerce_bool(dry_run, field_name="dry_run", default=self.dry_run)
+        audit = self._with_allow_protected_audit({}, allow_protected=allow_protected)
+        if effective_dry_run:
+            details = {
+                "groupname": group.groupname,
+                "members_to_add": to_add,
+                "members_to_remove": to_remove,
+            }
+            details.update(audit)            
             return DryRunResult(
                 action=ACTION_REPLACE_GROUP_MEMBERS,
-                target=groupname,
+                target=group.groupname,                
                 message="Group membership replacement simulated.",
-                details={
-                    "groupname": groupname, 
-                    "members_to_add": to_add, 
-                    "members_to_remove": to_remove
-                },
+                details=details,
                 warnings=warnings,
-                impact=ImpactMetadata(level=ImpactLevel.HIGH, affected_resources=[groupname]),
+                impact=ImpactMetadata(level=ImpactLevel.HIGH, affected_resources=[group.groupname]),
             )
         applied: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
         for member in to_add:
-            applied.append(self.add_user_to_group(member, groupname, dry_run=False).summary())
+            try:
+                applied.append(
+                    self.add_user_to_group(
+                        member,
+                        group.groupname,
+                        dry_run=False,
+                        allow_protected=allow_protected,
+                    ).summary()
+                )
+            except Exception as exc:
+                failed.append(
+                    {
+                        "member": member,
+                        "action": "add",
+                        "error": str(exc),
+                    }
+                )
         for member in to_remove:
-            applied.append(self.remove_user_from_group(member, groupname, dry_run=False).summary())
+            try:
+                applied.append(
+                    self.remove_user_from_group(
+                        member,
+                        group.groupname,
+                        dry_run=False,
+                        allow_protected=allow_protected,
+                    ).summary()
+                )
+            except Exception as exc:
+                failed.append(
+                    {
+                        "member": member,
+                        "action": "remove",
+                        "error": str(exc),
+                    }
+                )
+
+        details = {
+            "applied": applied,
+            "failed": failed,
+            "members_to_add": to_add,
+            "members_to_remove": to_remove,
+        }
+        details.update(audit)
         return SystemResult(
-            ok=True,
-            status=ResultStatus.SUCCESS,
+            ok=not failed,
+            status=ResultStatus.SUCCESS if not failed else ResultStatus.PARTIAL,
             action=ACTION_REPLACE_GROUP_MEMBERS,
-            target=groupname,
-            message="Group memberships replaced.",
-            details={"applied": applied, "members_to_add": to_add, "members_to_remove": to_remove},
+            target=group.groupname,
+            message="Group memberships replaced." if not failed else "Group memberships partially replaced.",
+            details=details,
             warnings=warnings,
             changed=bool(applied),
-            impact=ImpactMetadata(level=ImpactLevel.HIGH, affected_resources=[groupname], applied_resources=[groupname] if applied else []),
+            impact=ImpactMetadata(level=ImpactLevel.HIGH, affected_resources=[group.groupname], applied_resources=[group.groupname] if applied else []),
         )
 
     def apply_membership_spec(
-        self, 
-        spec: GroupMembershipSpec, 
-        *, 
-        dry_run: bool | None = None
-    ) -> SystemResult | list[str]:
+        self,
+        spec: GroupMembershipSpec,
+        *,
+        dry_run: bool | None = None,
+    ) -> SystemResult:
         if spec.action == MembershipAction.ADD:
             if spec.username is None:
                 raise GroupMembershipError("username is required for add membership.")
@@ -556,7 +801,18 @@ class LinuxGroupManager:
         if spec.action == MembershipAction.REPLACE:
             replacement = spec.metadata.get("members", [])
             return self.replace_group_members(spec.groupname, replacement, dry_run=dry_run)
-        return self.get_group_members(spec.groupname)
+        return SystemResult(
+            ok=True,
+            status=ResultStatus.SUCCESS,
+            action=ACTION_QUERY_GROUP,
+            target=spec.groupname,
+            message="Group members listed.",
+            details={
+                "groupname": spec.groupname,
+                "members": self.get_group_members(spec.groupname),
+            },
+            changed=False,
+        )
     
     def is_root_group(self, groupname: str | None = None, gid: int | None = None) -> bool:
         return groupname == ROOT_GROUP_NAME or gid == ROOT_GID
@@ -595,6 +851,43 @@ class LinuxGroupManager:
         except GroupNotFoundError:
             return
         raise InvalidGidError("GID is already in use.", details={"gid": gid})
+    
+    def ensure_not_protected_group(
+        self,
+        groupname: str,
+        gid: int | None = None,
+        *,
+        operation: str,
+        allow_protected: bool = False,
+    ) -> None:
+        groupname = _normalize_groupname(groupname, allow_reserved=True)
+        allow_protected = _coerce_bool(
+            allow_protected,
+            field_name="allow_protected",
+            default=False,
+        )
+
+        if self.is_protected_group(groupname, gid) and not allow_protected:
+            raise GroupMembershipError(
+                "Operation is blocked for protected group.",
+                details={
+                    "groupname": groupname,
+                    "gid": gid,
+                    "operation": operation,
+                    "allow_protected_required": True,
+                },
+            )
+
+        if self.is_admin_group(groupname, gid) and not allow_protected:
+            raise GroupMembershipError(
+                "Operation is blocked for administrative group.",
+                details={
+                    "groupname": groupname,
+                    "gid": gid,
+                    "operation": operation,
+                    "allow_protected_required": True,
+                },
+            )
 
 
     def ensure_user_exists(self, username: str) -> None:
@@ -650,29 +943,46 @@ class LinuxGroupManager:
         if "already a member" in combined:
             raise UserAlreadyInGroupError("User already belongs to the group.", details=details)
         raise CommandExecutionError("Linux group command failed.", details=details)
+    
+    def _with_allow_protected_audit(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        allow_protected: bool,
+    ) -> dict[str, Any]:
+        audited = dict(metadata)
+
+        if allow_protected:
+            audited["allow_protected"] = True
+
+        return audited
 
     def _execute_mutation(
-        self, 
-        command: Sequence[str], 
-        *, 
-        action: str, 
-        target: str, 
-        user: str | None = None, 
-        warnings: Sequence[str] = (), 
-        dry_run: bool | None = None
+        self,
+        command: Sequence[str],
+        *,
+        action: str,
+        target: str,
+        user: str | None = None,
+        warnings: Sequence[str] = (),
+        dry_run: bool | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> SystemResult:
-        metadata = {
-            "group": target, 
-            "user": user, 
-            "warnings": list(warnings), 
-            "module": "system/linux_groups"
+        operation_metadata = {
+            "group": target,
+            "user": user,
+            "warnings": list(warnings),
+            "module": "system/linux_groups",
         }
+        if metadata:
+            operation_metadata.update(dict(metadata))
+
         result = self.executor.execute(
-            command, 
-            action=action, 
-            target=target, 
-            dry_run=self.dry_run if dry_run is None else dry_run, 
-            metadata=metadata
+            command,
+            action=action,
+            target=target,
+            dry_run=_coerce_bool(dry_run, field_name="dry_run", default=self.dry_run),
+            metadata=operation_metadata
         )
         result.warnings.extend(warning for warning in warnings if warning not in result.warnings)
         result.details.update({
@@ -681,6 +991,8 @@ class LinuxGroupManager:
             "changes_applied": result.changed, 
             "resources_affected": [target] + ([user] if user else [])
         })
+        if metadata:
+            result.details.update(dict(metadata))
         if not result.ok:
             self._raise_from_result(result, action=action, groupname=target)
         return result
