@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .executor import CommandExecutor, ExecutorConfig
+from ..config import PasswordStrengthConfig
 from .result import ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
 from ..models.policy import PasswordPolicy, PolicyOrigin, PolicyStatus
 from ..utils.errors import (
@@ -107,10 +108,27 @@ SENSITIVE_COMMAND_OPTIONS = frozenset({
     "--password-hash",
 })
 
+def _split_sensitive_option(
+    token: str,
+) -> tuple[str, str] | None:
+    text = str(token)
+    lowered = text.lower()
+
+    for option in SENSITIVE_COMMAND_OPTIONS:
+        prefix = f"{option}="
+
+        if option.startswith("--") and lowered.startswith(prefix):
+            return text[: len(option)], text[len(prefix):]
+
+    return None
+
 @dataclass(slots=True)
 class PasswordApplySpec:
     username: str
-    password: str | None = None
+    password: str | None = field(
+        default=None,
+        repr=False,
+    )
     force_change: bool = False
     generated: bool = False
     dry_run: bool | None = None
@@ -304,35 +322,55 @@ def _normalize_password_policy_field(value: Any, *, field_name: str) -> int | No
     )
 
 
-def _validate_password_strength(username: str, password: str | None) -> None:
+def _validate_password_strength(
+    username: str,
+    password: str | None,
+    config: PasswordStrengthConfig,
+) -> None:
     if password is None:
         raise WeakPasswordError(
             "Password value is required.",
             details={"username": username, "password": REDACTED_SECRET},
         )
 
-    if len(password) < 12:
+    if len(password) < config.minimum_length:
         raise WeakPasswordError(
-            "Password must be at least 12 characters long.",
+            f"Password must be at least {config.minimum_length} characters long.",
             details={"username": username, "password": REDACTED_SECRET},
         )
 
-    if username.lower() in password.lower():
+    if config.reject_username and username.lower() in password.lower():
         raise WeakPasswordError(
             "Password cannot contain the username.",
             details={"username": username, "password": REDACTED_SECRET},
         )
 
     checks = {
-        "uppercase": any(char.isupper() for char in password),
-        "lowercase": any(char.islower() for char in password),
-        "digit": any(char.isdigit() for char in password),
-        "symbol": any(not char.isalnum() for char in password),
+        "uppercase": (
+            any(char.isupper() for char in password)
+            if config.require_uppercase
+            else True
+        ),
+        "lowercase": (
+            any(char.islower() for char in password)
+            if config.require_lowercase
+            else True
+        ),
+        "digit": (
+            any(char.isdigit() for char in password)
+            if config.require_digit
+            else True
+        ),
+        "symbol": (
+            any(not char.isalnum() for char in password)
+            if config.require_symbol
+            else True
+        ),
     }
 
     if not all(checks.values()):
         raise WeakPasswordError(
-            "Password must include uppercase, lowercase, digit, and symbol.",
+            "Password does not meet the configured strength policy.",
             details={
                 "username": username,
                 "password": REDACTED_SECRET,
@@ -348,7 +386,9 @@ def _is_sensitive_detail_key(key: Any) -> bool:
 
     return normalized.endswith(SENSITIVE_KEY_SUFFIXES)
 
-def _sanitize_command(command: Sequence[str]) -> list[str]:
+def _sanitize_command(
+    command: Sequence[str],
+) -> list[str]:
     redacted: list[str] = []
     redact_next = False
 
@@ -358,6 +398,15 @@ def _sanitize_command(command: Sequence[str]) -> list[str]:
         if redact_next:
             redacted.append(REDACTED_SECRET)
             redact_next = False
+            continue
+
+        inline_sensitive = _split_sensitive_option(text)
+
+        if inline_sensitive is not None:
+            option, _ = inline_sensitive
+            redacted.append(
+                f"{option}={REDACTED_SECRET}"
+            )
             continue
 
         if text.lower() in SENSITIVE_COMMAND_OPTIONS:
@@ -602,10 +651,15 @@ class UserIdentity:
 
 class LinuxPasswordManager:
     def __init__(
-        self, executor: CommandExecutor | None = None, *, dry_run: bool = False
+        self,
+        executor: CommandExecutor | None = None,
+        *,
+        dry_run: bool = False,
+        password_strength: PasswordStrengthConfig | None = None,    
     ) -> None:
         self.executor = executor or CommandExecutor(ExecutorConfig(dry_run=dry_run))
         self.dry_run = dry_run
+        self.password_strength = password_strength or PasswordStrengthConfig()
 
     def change_password(
         self,
@@ -614,7 +668,6 @@ class LinuxPasswordManager:
         *,
         force_change: bool = False,
         dry_run: bool | None = None,
-        validate_user: bool = True,
         allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
@@ -637,9 +690,9 @@ class LinuxPasswordManager:
             allow_admin=allow_admin,
         )
         if password is not None:
-            _validate_password_strength(username, password)
+            _validate_password_strength(username, password, self.password_strength)
         elif not effective_dry_run:
-            _validate_password_strength(username, password)
+            _validate_password_strength(username, password, self.password_strength)
         self.ensure_operation_does_not_expose_secrets(_build_change_password_command())
         stdin_data = "" if effective_dry_run else f"{username}:{password}\n"
         result = self.executor.execute_with_stdin(
@@ -680,6 +733,7 @@ class LinuxPasswordManager:
                     allow_admin=allow_admin,
                 )
             except (
+                AdministrativeAccountProtectionError,
                 ForcePasswordChangeError,
                 InsufficientPermissionsError,
                 CommandExecutionError,
@@ -751,6 +805,11 @@ class LinuxPasswordManager:
                 "Generated password is required outside dry-run.",
                 details={"username": username, "password": REDACTED_SECRET},
             )
+        sensitive_values = (
+            (generated_password,)
+            if generated_password
+            else ()
+        )
         result = self.change_password(
             username,
             generated_password,
@@ -774,8 +833,22 @@ class LinuxPasswordManager:
                 "generated_password_applied": result.is_effectively_ok,
                 "secret": REDACTED_SECRET,
                 "secret_redacted": True,
-            }
+            },
+            sensitive_values=sensitive_values,
         )
+
+        if result.execution:
+            result.execution.command = _sanitize_command(
+                result.execution.command or []
+            )
+            result.execution.stdout = _sanitize_text(
+                result.execution.stdout,
+                sensitive_values=sensitive_values,
+            )
+            result.execution.stderr = _sanitize_text(
+                result.execution.stderr,
+                sensitive_values=sensitive_values,
+            )
 
         return result
     
@@ -879,7 +952,7 @@ class LinuxPasswordManager:
     def requires_password_change(self, username: str) -> bool:
         return self.get_password_status(username).requires_change
     
-    def lock_password(
+    def lock_password_authentication(
         self,
         username: str,
         *,
@@ -920,7 +993,7 @@ class LinuxPasswordManager:
             administrative_target=administrative_target,
         )
         
-    def unlock_password(
+    def unlock_password_authentication(
         self,
         username: str,
         *,
@@ -960,6 +1033,36 @@ class LinuxPasswordManager:
             allow_admin=allow_admin,
             administrative_target=administrative_target,
         )
+
+    def lock_password(
+        self,
+        username: str,
+        **kwargs: Any,
+    ) -> SystemResult:
+        result = self.lock_password_authentication(
+            username,
+            **kwargs,
+        )
+        result.warnings.append(
+            "lock_password() only disables password authentication; "
+            "it does not disable SSH keys or all login mechanisms."
+        )
+        return result
+
+    def unlock_password(
+        self,
+        username: str,
+        **kwargs: Any,
+    ) -> SystemResult:
+        result = self.unlock_password_authentication(
+            username,
+            **kwargs,
+        )
+        result.warnings.append(
+            "unlock_password() only enables password authentication; "
+            "it does not enable or disable SSH keys or all login mechanisms."
+        )
+        return result
     
     def is_password_locked(self, username: str) -> bool:
         return self.get_password_status(username).locked
@@ -976,7 +1079,9 @@ class LinuxPasswordManager:
         self._raise_if_failed(
             status_result, CommandExecutionError, "Unable to query password status."
         )
-        info = self.get_password_policy(username)
+        info = self._get_password_policy_for_existing_user(
+            username
+        )
         technical_state = _normalize_password_state(
             status_result.execution.stdout if status_result.execution else ""
         )
@@ -993,9 +1098,10 @@ class LinuxPasswordManager:
             info.status = STATUS_UNKNOWN
         return info
     
-    def get_password_policy(self, username: str) -> PasswordStatusInfo:
-        username = _normalize_username(username)
-        self.ensure_user_exists(username)
+    def _get_password_policy_for_existing_user(
+        self,
+        username: str,
+    ) -> PasswordStatusInfo:
         result = self.executor.execute(
             _build_query_expiration_command(username),
             action=ACTION_QUERY_PASSWORD_STATUS,
@@ -1004,20 +1110,34 @@ class LinuxPasswordManager:
             env={"LC_ALL": "C"},
         )
         self._raise_if_failed(
-            result, CommandExecutionError, "Unable to query password aging information."
-        )
+            result,
+            CommandExecutionError,
+            "Unable to query password aging information.",        )
         try:
             return _parse_chage_output(
-                username, result.execution.stdout if result.execution else ""
-            )
+                username,
+                result.execution.stdout
+                if result.execution
+                else "",            )
         except CommandExecutionError:
             raise
         except Exception as exc:
             raise CommandExecutionError(
-                "Unexpected chage output.", 
-                details=_sanitize_details({"username": username}), 
+                "Unexpected chage output.",
+                details={"username": username},
                 cause=exc,
             ) from exc
+        
+    def get_password_policy(
+        self,
+        username: str,
+    ) -> PasswordStatusInfo:
+        username = _normalize_username(username)
+        self.ensure_user_exists(username)
+
+        return self._get_password_policy_for_existing_user(
+            username
+        )
         
     def get_last_password_change(self, username: str) -> str | None:
         return self.get_password_policy(username).last_changed
@@ -1136,12 +1256,7 @@ class LinuxPasswordManager:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
         effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        administrative_target = self.ensure_not_admin_password_target(
-            username,
-            operation=action,
-            allow_admin=allow_admin,
-        )
+
         values = self._policy_values(
             policy, 
             minimum_days=minimum_days, 
@@ -1156,6 +1271,12 @@ class LinuxPasswordManager:
                 "No password policy changes requested.",
                 dry_run=effective_dry_run,
             )
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
+        administrative_target = self.ensure_not_admin_password_target(
+            username,
+            operation=action,
+            allow_admin=allow_admin,
+        )
         self.validate_policy_values(**values)
         command = _build_aging_command(username, **values)
         result = self.executor.execute(
@@ -1270,7 +1391,7 @@ class LinuxPasswordManager:
         username = _normalize_username(username)
         result = self.executor.execute(
             _build_user_exists_command(username), 
-            action="validate_user_exists", 
+            action="ensure_user_exists",
             target=username, 
             dry_run=False,
         )
@@ -1308,7 +1429,7 @@ class LinuxPasswordManager:
         administrative_target = identity.is_administrative
 
         if administrative_target and not allow_admin:
-            raise PasswordChangeError(
+            raise AdministrativeAccountProtectionError(
                 "Operation is blocked for an administrative account.",
                 details={
                     "username": username,
@@ -1357,12 +1478,29 @@ class LinuxPasswordManager:
 
         
     def ensure_operation_does_not_expose_secrets(self, command: Sequence[str]) -> None:
-        lowered_command = [str(part).lower() for part in command]
-        if any(part in {"-p", "--password", "--secret"} for part in lowered_command):
+        unsafe_options: list[str] = []
+
+        for token in command:
+            text = str(token)
+            lowered = text.lower()
+
+            if lowered in SENSITIVE_COMMAND_OPTIONS:
+                unsafe_options.append(lowered)
+                continue
+
+            inline_sensitive = _split_sensitive_option(text)
+
+            if inline_sensitive is not None:
+                option, _ = inline_sensitive
+                unsafe_options.append(option.lower())
+
+        if unsafe_options:
             raise PasswordChangeError(
                 "Unsafe password command strategy rejected.",
-                details={"command": _sanitize_command(command)},
-            )
+                details={
+                    "command": _sanitize_command(command),
+                    "unsafe_options": sorted(set(unsafe_options)),
+                },            )
     def _raise_if_failed(
         self,
         result: SystemResult,
@@ -1442,8 +1580,16 @@ class LinuxPasswordManager:
                 "target_user": username,
                 "administrative_target": administrative_target,
                 "allow_admin": allow_admin,
-                "changes_applied": changes if result.changed else [],
-                "projected_changes": changes if result.dry_run else [],
+                "changes_applied": (
+                    changes
+                    if result.changed and not result.dry_run
+                    else []
+                ),
+                "projected_changes": (
+                    changes
+                    if result.dry_run
+                    else []
+                ),
                 "secret": REDACTED_SECRET,
                 "secret_redacted": True,
                 "technical_layer": "system/linux_passwords.py",
@@ -1503,39 +1649,43 @@ class LinuxPasswordManager:
     def _combine_results(
         self, first: SystemResult, second: SystemResult, action: str, username: str
     ) -> SystemResult:
+        combined_dry_run = first.dry_run or second.dry_run
+        combined_changed = first.changed or second.changed
+        combined_changes = [
+            "password_hash_updated",
+            "change_required_next_login",
+        ]
         details = _sanitize_details(
             {
                 "primary": first.to_dict(),
                 "secondary": second.to_dict(),
                 "secret": REDACTED_SECRET,
-                "changes_applied": [
-                    "password_hash_updated",
-                    "change_required_next_login",
-                ]
-                if not first.dry_run
-                else [],
-                "projected_changes": [
-                    "password_hash_updated",
-                    "change_required_next_login",
-                ]
-                if first.dry_run
-                else [],
+                "changes_applied": (
+                    combined_changes
+                    if combined_changed and not combined_dry_run
+                    else []
+                ),
+                "projected_changes": (
+                    combined_changes
+                    if combined_dry_run
+                    else []
+                ),
             }
         )
         return SystemResult(
             ok=first.is_effectively_ok and second.is_effectively_ok,
             status=ResultStatus.DRY_RUN
-            if first.dry_run or second.dry_run
+            if combined_dry_run
             else ResultStatus.SUCCESS,
             action=action,
             target=username,
             message="Password operation completed with forced change."
-            if not first.dry_run
+            if not combined_dry_run
             else "Password operation simulated with forced change.",
             details=details,
             warnings=list(dict.fromkeys([*first.warnings, *second.warnings])),
-            dry_run=first.dry_run or second.dry_run,
-            changed=first.changed or second.changed,
+            dry_run=combined_dry_run,
+            changed=combined_changed,
             execution=first.execution,
             impact=ImpactMetadata(
                 level=max(

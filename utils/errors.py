@@ -191,6 +191,10 @@ class ForcePasswordChangeError(PasswordError):
     message = "Unable to require a password change at next login."
     error_code = "FORCE_PASSWORD_CHANGE_ERROR"
 
+class AdministrativeAccountProtectionError(PasswordChangeError):
+    """Raised when an operation targets a protected UID 0 account."""
+
+
 class PolicyError(UsrCtlError):
     message = "Error in security policies."
     error_code = "POLICY_ERROR"
@@ -415,6 +419,7 @@ __all__ = [
     "PasswordGenerationError",
     "PasswordChangeError",
     "ForcePasswordChangeError",
+    "AdministrativeAccountProtectionError",
     "PolicyError",
     "AccountExpirationError",
     "InactivityPolicyError",

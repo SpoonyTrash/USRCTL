@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,3 +15,12 @@ TEMPLATE_USER_PATH = TEMPLATES_DIR / "user.conf.j2"
 TEMPLATE_GROUP_PATH = TEMPLATES_DIR / "group.conf.j2"
 
 LIMITS_D_DIR = Path("/etc/security/limits.d")
+
+@dataclass(frozen=True, slots=True)
+class PasswordStrengthConfig:
+    minimum_length: int = 12
+    require_uppercase: bool = True
+    require_lowercase: bool = True
+    require_digit: bool = True
+    require_symbol: bool = True
+    reject_username: bool = True
