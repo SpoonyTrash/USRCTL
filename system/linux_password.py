@@ -83,6 +83,33 @@ class PasswordApplySpec:
     generated: bool = False
     dry_run: bool | None = None
 
+    def __post_init__(self) -> None:
+        self.username = _normalize_username(self.username)
+        self.force_change = _coerce_bool(
+            self.force_change,
+            field_name="force_change",
+            default=False,
+        )
+        self.generated = _coerce_bool(
+            self.generated,
+            field_name="generated",
+            default=False,
+        )
+        self.dry_run = (
+            None
+            if self.dry_run is None
+            else _coerce_bool(self.dry_run, field_name="dry_run", default=False)
+        )
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "username": self.username,
+            "password": REDACTED_SECRET if self.password else None,
+            "force_change": self.force_change,
+            "generated": self.generated,
+            "dry_run": self.dry_run,
+        }
+
 @dataclass(slots=True)
 class PasswordStatusInfo:
     username: str
@@ -124,16 +151,57 @@ def _normalize_username(username: str) -> str:
         raise ValidationError("Username cannot be empty.", details={"field": "username"})
     return validate_username(text, allow_reserved=True)
 
+def _coerce_bool(value: Any, *, field_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValidationError(
+            f"{field_name} must be a boolean-like value.",
+            details={"field": field_name, "value": value},
+        )
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+
+        if normalized in {"true", "yes", "y", "1"}:
+            return True
+
+        if normalized in {"false", "no", "n", "0"}:
+            return False
+
+        raise ValidationError(
+            f"{field_name} must be one of: true/false, yes/no, 1/0.",
+            details={"field": field_name, "value": value},
+        )
+
+    raise ValidationError(
+        f"{field_name} must be a boolean-like value.",
+        details={"field": field_name, "value": value},
+    )
+
 def _normalize_password_state(value: str | None) -> str:
-    text = (value or "").strip().lower()
-    if text in {"locked", "l", "lk", "password locked"} or text.startswith("l "):
-        return STATUS_LOCKED
-    if text in {"expired", "e", "password expired"}:
-        return STATUS_EXPIRED
-    if text in {"requires_change", "must change", "change required"}:
-        return STATUS_REQUIRES_CHANGE
-    if text in {"active", "p", "ps", "usable"} or text.startswith("p "):
+    text = (value or "").strip()
+    if not text:
+        return STATUS_UNKNOWN
+
+    parts = text.split()
+    status_token = parts[1].lower() if len(parts) > 1 else parts[0].lower()
+
+    if status_token in {"p", "ps"}:
         return STATUS_ACTIVE
+
+    if status_token == "np":
+        return STATUS_UNKNOWN
+
+    if status_token in {"e", "expired"}:
+        return STATUS_EXPIRED
+
     return STATUS_UNKNOWN
 
 
@@ -157,6 +225,52 @@ def _normalize_policy_days(value: Any, *, field_name: str, allow_never: bool = T
     if days < 0 and not (allow_never and days == -1):
         raise PolicyError(f"{field_name} cannot be negative.", details={"field": field_name, "value": days})
     return days
+
+def _normalize_password_policy_field(value: Any, *, field_name: str) -> int | None:
+    allow_never = field_name in {"maximum_days", "inactive_days"}
+    return _normalize_policy_days(
+        value,
+        field_name=field_name,
+        allow_never=allow_never,
+    )
+
+
+def _validate_password_strength(username: str, password: str | None) -> None:
+    if password is None:
+        raise WeakPasswordError(
+            "Password value is required.",
+            details={"username": username, "password": REDACTED_SECRET},
+        )
+
+    if len(password) < 12:
+        raise WeakPasswordError(
+            "Password must be at least 12 characters long.",
+            details={"username": username, "password": REDACTED_SECRET},
+        )
+
+    if username.lower() in password.lower():
+        raise WeakPasswordError(
+            "Password cannot contain the username.",
+            details={"username": username, "password": REDACTED_SECRET},
+        )
+
+    checks = {
+        "uppercase": any(char.isupper() for char in password),
+        "lowercase": any(char.islower() for char in password),
+        "digit": any(char.isdigit() for char in password),
+        "symbol": any(not char.isalnum() for char in password),
+    }
+
+    if not all(checks.values()):
+        raise WeakPasswordError(
+            "Password must include uppercase, lowercase, digit, and symbol.",
+            details={
+                "username": username,
+                "password": REDACTED_SECRET,
+                "checks": checks,
+            },
+        )
+
 
 def _sanitize_command(command: Sequence[str]) -> list[str]:
     redacted: list[str] = []
@@ -299,13 +413,29 @@ class LinuxPasswordManager:
         force_change: bool = False,
         dry_run: bool | None = None,
         validate_user: bool = True,
+        allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        force_change = _coerce_bool(
+            force_change,
+            field_name="force_change",
+            default=False,
+        )
+        allow_admin = _coerce_bool(
+            allow_admin,
+            field_name="allow_admin",
+            default=False,
+        )
+        self.ensure_not_admin_password_target(
+            username,
+            operation=ACTION_CHANGE_PASSWORD,
+            allow_admin=allow_admin,
+        )
         effective_dry_run = self._effective_dry_run(dry_run)
         if validate_user:
             self.ensure_user_exists(username)
-        if not effective_dry_run and not password:
-            raise WeakPasswordError("Password value is required for real technical application.", details={"username": username, "password": REDACTED_SECRET})
+        if not effective_dry_run:
+            _validate_password_strength(username, password)
         self.ensure_operation_does_not_expose_secrets(_build_change_password_command())
         stdin_data = "" if effective_dry_run else f"{username}:{password}\n"
         result = self.executor.execute_with_stdin(
@@ -315,12 +445,21 @@ class LinuxPasswordManager:
             action=ACTION_CHANGE_PASSWORD,
             target=username,
             dry_run=effective_dry_run,
-            metadata=self._metadata(action=ACTION_CHANGE_PASSWORD, username=username, secret_used=not effective_dry_run),
-        )
+            metadata=self._metadata(
+                action=ACTION_CHANGE_PASSWORD,
+                username=username,
+                secret_used=not effective_dry_run,
+                allow_admin=allow_admin,
+            ),        )
         self._raise_if_failed(result, PasswordChangeError, "Unable to change password.")
         result = self._with_password_result_details(result, ACTION_CHANGE_PASSWORD, username, ["password_hash_updated"])
         if force_change and result.is_effectively_ok:
-            forced = self.force_password_change(username, dry_run=effective_dry_run, validate_user=False)
+            forced = self.force_password_change(
+                username,
+                dry_run=effective_dry_run,
+                validate_user=False,
+                allow_admin=allow_admin,
+            )
             return self._combine_results(result, forced, ACTION_CHANGE_PASSWORD, username)
         return result
 
@@ -330,6 +469,7 @@ class LinuxPasswordManager:
             spec.password,
             force_change=spec.force_change,
             dry_run=spec.dry_run,
+            allow_admin=False,
         )
     
     def apply_generated_password(
@@ -339,58 +479,82 @@ class LinuxPasswordManager:
         *,
         force_change: bool = False,
         dry_run: bool | None = None,
+        allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        force_change = _coerce_bool(
+            force_change,
+            field_name="force_change",
+            default=False,
+        )
         effective_dry_run = self._effective_dry_run(dry_run)
         if not effective_dry_run and not generated_password:
             raise WeakPasswordError("Generated password is required outside dry-run.", details={"username": username, "password": REDACTED_SECRET})
-        result = self.change_password(username, generated_password, force_change=force_change, dry_run=effective_dry_run)
+        result = self.change_password(
+            username,
+            generated_password,
+            force_change=force_change,
+            dry_run=effective_dry_run,
+            allow_admin=allow_admin,
+        )
         result.action = ACTION_APPLY_GENERATED_PASSWORD
         result.details.update({"generated_password_applied": True, "secret": REDACTED_SECRET})
         return result
     
     def force_password_change(
-        self, 
-        username: str, 
-        *, 
-        dry_run: bool | None = None, 
-        validate_user: bool = True
+        self,
+        username: str,
+        *,
+        dry_run: bool | None = None,
+        validate_user: bool = True,
+        allow_admin: bool = False,
     ) -> SystemResult:
         return self.expire_password(
-            username, 
-            action=ACTION_FORCE_PASSWORD_CHANGE, 
-            dry_run=dry_run, 
-            validate_user=validate_user
+            username,
+            action=ACTION_FORCE_PASSWORD_CHANGE,
+            dry_run=dry_run,
+            validate_user=validate_user,
+            allow_admin=allow_admin,
         )
     
     def expire_password(
-        self, 
-        username: str, 
-        *, 
-        action: str = ACTION_EXPIRE_PASSWORD, 
-        dry_run: bool | None = None, 
-        validate_user: bool = True) -> SystemResult:
+        self,
+        username: str,
+        *,
+        action: str = ACTION_EXPIRE_PASSWORD,
+        dry_run: bool | None = None,
+        validate_user: bool = True,
+        allow_admin: bool = False) -> SystemResult:
         username = _normalize_username(username)
+        allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        self.ensure_not_admin_password_target(username, operation=action, allow_admin=allow_admin)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
         command = _build_expire_password_command(username)
         result = self.executor.execute(
-            command, 
-            action=action, 
-            target=username, 
-            dry_run=self._effective_dry_run(dry_run), 
-            metadata=self._metadata(action=action, username=username))
+            command,
+            action=action,
+            target=username,
+            dry_run=effective_dry_run,
+            metadata=self._metadata(action=action, username=username, allow_admin=allow_admin))
         self._raise_if_failed(result, ForcePasswordChangeError, "Unable to expire password.")
         return self._with_password_result_details(result, action, username, ["password_expired", "change_required_next_login"])
     
     def clear_password_expiration(
-        self, 
-        username: str, 
-        *, 
-        dry_run: bool | None = None, 
-        validate_user: bool = True
+        self,
+        username: str,
+        *,
+        dry_run: bool | None = None,
+        validate_user: bool = True,
+        allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        self.ensure_not_admin_password_target(username, operation=ACTION_CLEAR_PASSWORD_EXPIRATION, allow_admin=allow_admin)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
         command = _build_clear_expiration_command(username)
@@ -407,43 +571,53 @@ class LinuxPasswordManager:
         return self.get_password_status(username).requires_change
     
     def lock_password(
-        self, 
-        username: str, 
-        *, 
-        dry_run: bool | None = None, 
-        validate_user: bool = True
+        self,
+        username: str,
+        *,
+        dry_run: bool | None = None,
+        validate_user: bool = True,
+        allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        self.ensure_not_admin_password_target(username, operation=ACTION_LOCK_PASSWORD, allow_admin=allow_admin)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
         command = _build_lock_password_command(username)
         result = self.executor.execute(
-            command, 
-            action=ACTION_LOCK_PASSWORD, 
-            target=username, 
-            dry_run=self._effective_dry_run(dry_run), 
-            metadata=self._metadata(action=ACTION_LOCK_PASSWORD, username=username)
+            command,
+            action=ACTION_LOCK_PASSWORD,
+            target=username,
+            dry_run=effective_dry_run,
+            metadata=self._metadata(action=ACTION_LOCK_PASSWORD, username=username, allow_admin=allow_admin)
         )
         self._raise_if_failed(result, PasswordChangeError, "Unable to lock password.")
         return self._with_password_result_details(result, ACTION_LOCK_PASSWORD, username, ["password_authentication_locked"])
     
     def unlock_password(
-        self, 
-        username: str, 
-        *, 
-        dry_run: bool | None = None, 
-        validate_user: bool = True
+        self,
+        username: str,
+        *,
+        dry_run: bool | None = None,
+        validate_user: bool = True,
+        allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        self.ensure_not_admin_password_target(username, operation=ACTION_UNLOCK_PASSWORD, allow_admin=allow_admin)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
         command = _build_unlock_password_command(username)
         result = self.executor.execute(
-            command, 
-            action=ACTION_UNLOCK_PASSWORD, 
-            target=username, 
-            dry_run=self._effective_dry_run(dry_run), 
-            metadata=self._metadata(action=ACTION_UNLOCK_PASSWORD, username=username)
+            command,
+            action=ACTION_UNLOCK_PASSWORD,
+            target=username,
+            dry_run=effective_dry_run,
+            metadata=self._metadata(action=ACTION_UNLOCK_PASSWORD, username=username, allow_admin=allow_admin)
         )
         self._raise_if_failed(result, PasswordChangeError, "Unable to unlock password.")
         return self._with_password_result_details(
@@ -481,10 +655,11 @@ class LinuxPasswordManager:
         username = _normalize_username(username)
         self.ensure_user_exists(username)
         result = self.executor.execute(
-            _build_query_expiration_command(username), 
-            action=ACTION_QUERY_PASSWORD_STATUS, 
-            target=username, 
-            dry_run=False
+            _build_query_expiration_command(username),
+            action=ACTION_QUERY_PASSWORD_STATUS,
+            target=username,
+            dry_run=False,
+            env={"LC_ALL": "C"},
         )
         self._raise_if_failed(result, CommandExecutionError, "Unable to query password aging information.")
         try:
@@ -526,57 +701,66 @@ class LinuxPasswordManager:
         )
     
     def set_password_max_days(
-        self, 
-        username: str, 
-        days: int | None, 
-        *, 
-        dry_run: bool | None = None
+        self,
+        username: str,
+        days: int | None,
+        *,
+        dry_run: bool | None = None,
+        allow_admin: bool = False,
     ) -> SystemResult:
         return self.set_password_policy(
-            username, 
-            maximum_days=_normalize_policy_days(days, field_name="maximum_days"), 
-            dry_run=dry_run, 
-            action=ACTION_SET_PASSWORD_MAX_DAYS
+            username,
+            maximum_days=_normalize_password_policy_field(days, field_name="maximum_days"),
+            dry_run=dry_run,
+            action=ACTION_SET_PASSWORD_MAX_DAYS,
+            allow_admin=allow_admin,
         )
     
     def set_password_min_days(
-            self, 
-            username: str, 
-            days: int | None, 
-            *, dry_run: bool | None = None) -> SystemResult:
+            self,
+            username: str,
+            days: int | None,
+            *,
+            dry_run: bool | None = None,
+            allow_admin: bool = False) -> SystemResult:
         return self.set_password_policy(
-            username, 
-            minimum_days=_normalize_policy_days(days, field_name="minimum_days"), 
-            dry_run=dry_run, 
-            action=ACTION_SET_PASSWORD_MIN_DAYS
+            username,
+            minimum_days=_normalize_password_policy_field(days, field_name="minimum_days"),
+            dry_run=dry_run,
+            action=ACTION_SET_PASSWORD_MIN_DAYS,
+            allow_admin=allow_admin,
         )
 
     def set_password_warning_days(
-            self, 
-            username: str, 
-            days: int | None, 
-            *, 
-            dry_run: bool | None = None
+            self,
+            username: str,
+            days: int | None,
+            *,
+            dry_run: bool | None = None,
+            allow_admin: bool = False,
         ) -> SystemResult:
         return self.set_password_policy(
-            username, 
-            warning_days=_normalize_policy_days(days, field_name="warning_days"), 
-            dry_run=dry_run, 
-            action=ACTION_SET_PASSWORD_WARNING_DAYS
+            username,
+            warning_days=_normalize_password_policy_field(days, field_name="warning_days"),
+            dry_run=dry_run,
+            action=ACTION_SET_PASSWORD_WARNING_DAYS,
+            allow_admin=allow_admin,
         )
     
     def set_password_inactive_days(
-        self, 
-        username: str, 
-        days: int | None, 
-        *, 
-        dry_run: bool | None = None
+        self,
+        username: str,
+        days: int | None,
+        *,
+        dry_run: bool | None = None,
+        allow_admin: bool = False,
     ) -> SystemResult:
         return self.set_password_policy(
-            username, 
-            inactive_days=_normalize_policy_days(days, field_name="inactive_days"), 
-            dry_run=dry_run, 
-            action=ACTION_SET_PASSWORD_INACTIVE_DAYS
+            username,
+            inactive_days=_normalize_password_policy_field(days, field_name="inactive_days"),
+            dry_run=dry_run,
+            action=ACTION_SET_PASSWORD_INACTIVE_DAYS,
+            allow_admin=allow_admin,
         )
     
     def set_password_policy(
@@ -590,8 +774,13 @@ class LinuxPasswordManager:
         inactive_days: int | None = None,
         dry_run: bool | None = None,
         action: str = ACTION_SET_PASSWORD_POLICY,
+        allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
+        allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        self.ensure_not_admin_password_target(username, operation=action, allow_admin=allow_admin)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         self.ensure_user_exists(username)
         values = self._policy_values(
             policy, 
@@ -600,13 +789,20 @@ class LinuxPasswordManager:
             warning_days=warning_days, 
             inactive_days=inactive_days
         )
+        if all(value is None for value in values.values()):
+            return self._skipped_result(
+                action,
+                username,
+                "No password policy changes requested.",
+                dry_run=effective_dry_run,
+            )
         self.validate_policy_values(**values)
         command = _build_aging_command(username, **values)
         result = self.executor.execute(
             command, 
             action=action, 
             target=username, 
-            dry_run=self._effective_dry_run(dry_run), 
+            dry_run=effective_dry_run,
             metadata=self._metadata(
                 action=action, 
                 username=username, 
@@ -641,6 +837,35 @@ class LinuxPasswordManager:
         if getuser() == "root":
             return True
         raise InsufficientPermissionsError("Password operations usually require root privileges.")
+
+    def ensure_not_admin_password_target(
+        self,
+        username: str,
+        *,
+        operation: str,
+        allow_admin: bool = False,
+    ) -> None:
+        username = _normalize_username(username)
+        allow_admin = _coerce_bool(
+            allow_admin,
+            field_name="allow_admin",
+            default=False,
+        )
+
+        if username in ADMIN_USER_NAMES and not allow_admin:
+            raise PasswordChangeError(
+                "Operation is blocked for administrative account.",
+                details={
+                    "username": username,
+                    "operation": operation,
+                    "allow_admin_required": True,
+                },
+            )
+
+    def _ensure_real_mutation_allowed(self, *, dry_run: bool) -> None:
+        if not dry_run:
+            self.check_permissions()
+
     
     def verify_mechanism_compatibility(self) -> dict[str, bool]:
         return self.check_required_commands(raise_on_missing=False)
@@ -659,7 +884,7 @@ class LinuxPasswordManager:
             "warning_days": warning_days,
             "inactive_days": inactive_days,
         }.items():
-            _normalize_policy_days(value, field_name=field_name)
+            _normalize_password_policy_field(value, field_name=field_name)
         if minimum_days is not None and maximum_days is not None and maximum_days != -1 and minimum_days > maximum_days:
             raise PolicyError("minimum_days cannot be greater than maximum_days.", details={"minimum_days": minimum_days, "maximum_days": maximum_days})
 
@@ -677,8 +902,12 @@ class LinuxPasswordManager:
     ) -> None:
         if result.ok:
             return
+        result.details = _sanitize_details(result.details)
         details = _sanitize_details(result.details)
         if result.execution:
+            result.execution.command = _sanitize_command(result.execution.command or [])
+            result.execution.stdout = _sanitize_text(result.execution.stdout)
+            result.execution.stderr = _sanitize_text(result.execution.stderr)
             details.update({
                 "command": _sanitize_command(result.execution.command or []),
                 "return_code": result.execution.return_code,
@@ -701,6 +930,7 @@ class LinuxPasswordManager:
             **result.details,
             "action": action,
             "target_user": username,
+            "allow_admin": username in ADMIN_USER_NAMES,
             "changes_applied": changes if result.changed else [],
             "projected_changes": changes if result.dry_run else [],
             "secret": REDACTED_SECRET,
@@ -715,6 +945,31 @@ class LinuxPasswordManager:
             result.warnings.append("High-impact password operation on an administrative user.")
             result.impact.level = ImpactLevel.HIGH if result.impact.level != ImpactLevel.CRITICAL else result.impact.level
         return result
+    
+    def _skipped_result(
+        self,
+        action: str,
+        username: str,
+        message: str,
+        *,
+        dry_run: bool,
+    ) -> SystemResult:
+        return SystemResult(
+            ok=True,
+            status=ResultStatus.SKIPPED,
+            action=action,
+            target=username,
+            message=message,
+            changed=False,
+            dry_run=dry_run,
+            details={
+                "action": action,
+                "target_user": username,
+                "changes_applied": [],
+                "projected_changes": [],
+            },
+            impact=ImpactMetadata(level=ImpactLevel.NONE),
+        )
 
     def _combine_results(
         self, 
@@ -771,23 +1026,25 @@ class LinuxPasswordManager:
         for key, value in policy_values.items():
             if values[key] is None:
                 values[key] = value
-        return values
-
+        return {
+            key: _normalize_password_policy_field(value, field_name=key)
+            for key, value in values.items()
+        }
     def _metadata(
-        self, 
-        *, 
-        action: str, 
-        username: str, 
-        secret_used: bool = False, 
-        policy: Mapping[str, Any] | None = None
+        self,
+        *,
+        action: str,
+        username: str,
+        secret_used: bool = False,
+        policy: Mapping[str, Any] | None = None,
+        allow_admin: bool = False,
     ) -> dict[str, Any]:
         warnings: list[str] = []
         impact = "medium"
         if username in ADMIN_USER_NAMES:
             impact = "high"
             warnings.append("Operation targets an administrative account.")
-        return _sanitize_details({
-            "action": action,
+        metadata = {            "action": action,
             "username": username,
             "secret_used": secret_used,
             "secret": REDACTED_SECRET if secret_used else None,
@@ -796,14 +1053,20 @@ class LinuxPasswordManager:
             "warnings": warnings,
             "reads_shadow_directly": False,
             "writes_shadow_directly": False,
-        })
+        }
+        if allow_admin:
+            metadata["allow_admin"] = True
+        return _sanitize_details(metadata)
 
 
     def _effective_dry_run(self, dry_run: bool | None) -> bool:
-        return self.dry_run if dry_run is None else bool(dry_run)
-   
+        return _coerce_bool(
+            dry_run,
+            field_name="dry_run",
+            default=self.dry_run,
+        )   
 
-__all__ =[
+__all__ = [
     "ACTION_CHANGE_PASSWORD",
     "ACTION_APPLY_GENERATED_PASSWORD",
     "ACTION_EXPIRE_PASSWORD",
@@ -817,6 +1080,5 @@ __all__ =[
     "PasswordCommandStrategy",
     "PasswordStatusInfo",
     "REDACTED_SECRET",
-    "REQUIRED_COMMANDS"
-
+    "REQUIRED_COMMANDS",
 ]
