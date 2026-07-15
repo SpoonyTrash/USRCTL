@@ -1,14 +1,13 @@
+import os
 from dataclasses import dataclass, field
 from enum import StrEnum
-from getpass import getuser
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from system.executor import CommandExecutor, ExecutorConfig
-
-from models.policy import PasswordPolicy, PolicyStatus, PolicyOrigin
-from system.result import ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
-from utils.errors import (
+from .executor import CommandExecutor, ExecutorConfig
+from .result import ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
+from ..models.policy import PasswordPolicy, PolicyOrigin, PolicyStatus
+from ..utils.errors import (
     CommandExecutionError,
     ForcePasswordChangeError,
     InsufficientPermissionsError,
@@ -20,15 +19,13 @@ from utils.errors import (
     WeakPasswordError,
 
 )
-from utils.validators import validate_username
+from ..utils.validators import validate_username
 
 CMD_PASSWD = "passwd"
 CMD_CHPASSWD = "chpasswd"
 CMD_GETENT = "getent"
 CMD_CHAGE = "chage"
 CMD_USERMOD = "usermod"
-CMD_ID = "id"
-
 SHADOW_PATH = Path("/etc/shadow")
 
 ACTION_CHANGE_PASSWORD = "change_password"
@@ -49,7 +46,7 @@ STATUS_ACTIVE = "active"
 STATUS_LOCKED = "locked"
 STATUS_UNKNOWN = "unknown"
 STATUS_EXPIRED = "expired"
-STATUS_REQUIRES_CHANGE = "requires_change"
+STATUS_NO_PASSWORD = "no_password"
 
 CHAGE_LAST_CHANGE = "last_password_change"
 CHAGE_PASSWORD_EXPIRES = "password_expires"
@@ -71,7 +68,7 @@ CHAGE_EXPECTED_FIELDS = (
 
 EXPIRE_IMMEDIATELY_VALUE = "0"
 REDACTED_SECRET = "[REDACTED]"
-REQUIRED_COMMANDS = (CMD_PASSWD, CMD_CHPASSWD, CMD_CHAGE, CMD_USERMOD, CMD_GETENT, CMD_ID)
+REQUIRED_COMMANDS = (CMD_PASSWD, CMD_CHPASSWD, CMD_CHAGE, CMD_USERMOD, CMD_GETENT)
 SENSITIVE_DETAIL_KEYS = frozenset({"password", "secret", "hash", "credential", "stdin", "stdin_data"})
 ADMIN_USER_NAMES = frozenset({"root"})
 
@@ -187,20 +184,25 @@ def _coerce_bool(value: Any, *, field_name: str, default: bool = False) -> bool:
 
 def _normalize_password_state(value: str | None) -> str:
     text = (value or "").strip()
+
     if not text:
         return STATUS_UNKNOWN
 
     parts = text.split()
-    status_token = parts[1].lower() if len(parts) > 1 else parts[0].lower()
 
-    if status_token in {"p", "ps"}:
-        return STATUS_ACTIVE
-
-    if status_token == "np":
+    if len(parts) < 2:
         return STATUS_UNKNOWN
 
-    if status_token in {"e", "expired"}:
-        return STATUS_EXPIRED
+    status_token = parts[1].strip().lower()
+
+    if status_token == "p":
+        return STATUS_ACTIVE
+
+    if status_token in {"l", "lk"}:
+        return STATUS_LOCKED
+
+    if status_token == "np":
+        return STATUS_NO_PASSWORD
 
     return STATUS_UNKNOWN
 
@@ -332,6 +334,21 @@ def _parse_chage_output(username: str, output: str) -> PasswordStatusInfo:
             continue
         fields[normalized_key] = raw_value.strip()
 
+    missing_fields = [
+        field_name
+        for field_name in CHAGE_EXPECTED_FIELDS
+        if field_name not in fields
+    ]
+
+    if missing_fields:
+        raise CommandExecutionError(
+            "Incomplete chage output.",
+            details={
+                "username": username,
+                "missing_fields": missing_fields,
+            },
+        )
+
     minimum_days = _normalize_policy_days(fields.get(CHAGE_MIN_DAYS), field_name=CHAGE_MIN_DAYS) if CHAGE_MIN_DAYS in fields else None
     maximum_days = _normalize_policy_days(fields.get(CHAGE_MAX_DAYS), field_name=CHAGE_MAX_DAYS) if CHAGE_MAX_DAYS in fields else None
     warning_days = _normalize_policy_days(fields.get(CHAGE_WARNING_DAYS), field_name=CHAGE_WARNING_DAYS) if CHAGE_WARNING_DAYS in fields else None
@@ -432,9 +449,12 @@ class LinuxPasswordManager:
             allow_admin=allow_admin,
         )
         effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
-        if not effective_dry_run:
+        if password is not None:
+            _validate_password_strength(username, password)
+        elif not effective_dry_run:
             _validate_password_strength(username, password)
         self.ensure_operation_does_not_expose_secrets(_build_change_password_command())
         stdin_data = "" if effective_dry_run else f"{username}:{password}\n"
@@ -454,16 +474,46 @@ class LinuxPasswordManager:
         self._raise_if_failed(result, PasswordChangeError, "Unable to change password.")
         result = self._with_password_result_details(result, ACTION_CHANGE_PASSWORD, username, ["password_hash_updated"])
         if force_change and result.is_effectively_ok:
-            forced = self.force_password_change(
-                username,
-                dry_run=effective_dry_run,
-                validate_user=False,
-                allow_admin=allow_admin,
-            )
+            try:
+                forced = self.force_password_change(
+                    username,
+                    dry_run=effective_dry_run,
+                    validate_user=False,
+                    allow_admin=allow_admin,
+                )
+            except (
+                ForcePasswordChangeError,
+                InsufficientPermissionsError,
+                CommandExecutionError,
+            ) as exc:
+                raise PasswordChangeError(
+                    "Password changed, but forcing a change at next login failed.",
+                    details=_sanitize_details(
+                        {
+                            "username": username,
+                            "partial_success": True,
+                            "password_changed": True,
+                            "force_change_applied": False,
+                            "primary_result": result.to_dict(),
+                            "secondary_error": getattr(exc, "details", {}),
+                        }
+                    ),
+                    cause=exc,
+                ) from exc
+
             return self._combine_results(result, forced, ACTION_CHANGE_PASSWORD, username)
         return result
 
     def apply_password(self, spec: PasswordApplySpec) -> SystemResult:
+        if spec.generated:
+            return self.apply_generated_password(
+                spec.username,
+                spec.password,
+                force_change=spec.force_change,
+                dry_run=spec.dry_run,
+                allow_admin=False,
+            )
+
         return self.change_password(
             spec.username,
             spec.password,
@@ -497,8 +547,28 @@ class LinuxPasswordManager:
             dry_run=effective_dry_run,
             allow_admin=allow_admin,
         )
+
         result.action = ACTION_APPLY_GENERATED_PASSWORD
-        result.details.update({"generated_password_applied": True, "secret": REDACTED_SECRET})
+        result.message = (
+            "Generated password application simulated."
+            if result.dry_run
+            else "Generated password applied."
+        )
+
+        result.details = _sanitize_details(
+            {
+                **result.details,
+                "action": ACTION_APPLY_GENERATED_PASSWORD,
+                "target_user": username,
+                "generated_password_applied": result.is_effectively_ok,
+                "secret": REDACTED_SECRET,
+                "secret_redacted": True,
+            }
+        )
+
+        if result.execution and hasattr(result.execution, "action"):
+            result.execution.action = ACTION_APPLY_GENERATED_PASSWORD
+
         return result
     
     def force_password_change(
@@ -562,8 +632,12 @@ class LinuxPasswordManager:
             command, 
             action=ACTION_CLEAR_PASSWORD_EXPIRATION, 
             target=username, 
-            dry_run=self._effective_dry_run(dry_run), 
-            metadata=self._metadata(action=ACTION_CLEAR_PASSWORD_EXPIRATION, username=username))
+            dry_run=effective_dry_run, 
+            metadata=self._metadata(
+                action=ACTION_CLEAR_PASSWORD_EXPIRATION,
+                username=username,
+                allow_admin=allow_admin,
+            ))
         self._raise_if_failed(result, ForcePasswordChangeError, "Unable to clear password expiration.")
         return self._with_password_result_details(result, ACTION_CLEAR_PASSWORD_EXPIRATION, username, ["password_expiration_reset"])
     
@@ -577,6 +651,7 @@ class LinuxPasswordManager:
         dry_run: bool | None = None,
         validate_user: bool = True,
         allow_admin: bool = False,
+        strategy: PasswordCommandStrategy = PasswordCommandStrategy.PASSWD,
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
@@ -585,7 +660,7 @@ class LinuxPasswordManager:
         self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
-        command = _build_lock_password_command(username)
+        command = _build_lock_password_command(username, strategy)
         result = self.executor.execute(
             command,
             action=ACTION_LOCK_PASSWORD,
@@ -603,6 +678,7 @@ class LinuxPasswordManager:
         dry_run: bool | None = None,
         validate_user: bool = True,
         allow_admin: bool = False,
+        strategy: PasswordCommandStrategy = PasswordCommandStrategy.PASSWD,
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
@@ -611,7 +687,7 @@ class LinuxPasswordManager:
         self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         if validate_user:
             self.ensure_user_exists(username)
-        command = _build_unlock_password_command(username)
+        command = _build_unlock_password_command(username, strategy)
         result = self.executor.execute(
             command,
             action=ACTION_UNLOCK_PASSWORD,
@@ -647,8 +723,12 @@ class LinuxPasswordManager:
             info.status = STATUS_LOCKED
         elif info.expired:
             info.status = STATUS_EXPIRED
-        elif technical_state != STATUS_UNKNOWN:
-            info.status = technical_state
+        elif technical_state == STATUS_NO_PASSWORD:
+            info.status = STATUS_NO_PASSWORD
+        elif technical_state == STATUS_ACTIVE:
+            info.status = STATUS_ACTIVE
+        else:
+            info.status = STATUS_UNKNOWN
         return info
     
     def get_password_policy(self, username: str) -> PasswordStatusInfo:
@@ -664,10 +744,12 @@ class LinuxPasswordManager:
         self._raise_if_failed(result, CommandExecutionError, "Unable to query password aging information.")
         try:
             return _parse_chage_output(username, result.execution.stdout if result.execution else "")
+        except CommandExecutionError:
+            raise
         except Exception as exc:
             raise CommandExecutionError(
                 "Unexpected chage output.", 
-                details=_sanitize_details({"username": username, "stdout": result.execution.stdout if result.execution else ""}), 
+                details=_sanitize_details({"username": username}), 
                 cause=exc
             ) from exc
         
@@ -834,9 +916,15 @@ class LinuxPasswordManager:
             raise UserNotFoundError("User does not exist.", details={"username": username})
         
     def check_permissions(self) -> bool:
-        if getuser() == "root":
+        effective_uid = os.geteuid()
+
+        if effective_uid == 0:
             return True
-        raise InsufficientPermissionsError("Password operations usually require root privileges.")
+
+        raise InsufficientPermissionsError(
+            "Password operations require root privileges.",
+            details={"effective_uid": effective_uid},
+        )
 
     def ensure_not_admin_password_target(
         self,
