@@ -36,6 +36,7 @@ ACTION_CLEAR_PASSWORD_EXPIRATION = "clear_password_expiration"
 ACTION_LOCK_PASSWORD = "lock_password"
 ACTION_UNLOCK_PASSWORD = "unlock_password"
 ACTION_QUERY_PASSWORD_STATUS = "query_password_status"
+ACTION_QUERY_USER_IDENTITY = "query_user_identity"
 ACTION_SET_PASSWORD_POLICY = "set_password_policy"
 ACTION_SET_PASSWORD_MAX_DAYS = "set_password_max_days"
 ACTION_SET_PASSWORD_MIN_DAYS = "set_password_min_days"
@@ -98,6 +99,13 @@ SENSITIVE_KEY_SUFFIXES = (
     "_stdin",
     "_stdin_data",
 )
+
+SENSITIVE_COMMAND_OPTIONS = frozenset({
+    "-p",
+    "--password",
+    "--secret",
+    "--password-hash",
+})
 
 @dataclass(slots=True)
 class PasswordApplySpec:
@@ -235,6 +243,24 @@ def _normalize_password_state(value: str | None) -> str:
 
     return STATUS_UNKNOWN
 
+def _normalize_password_strategy(
+    value: PasswordCommandStrategy | str,
+) -> PasswordCommandStrategy:
+    if isinstance(value, PasswordCommandStrategy):
+        return value
+
+    try:
+        return PasswordCommandStrategy(str(value).strip().lower())
+    except ValueError as exc:
+        raise ValidationError(
+            "Unsupported password command strategy.",
+            details={
+                "strategy": str(value),
+                "allowed": [strategy.value for strategy in PasswordCommandStrategy],
+            },
+            cause=exc,
+        ) from exc
+
 
 def _normalize_chage_date(value: str | None) -> str | None:
     text = (value or "").strip()
@@ -324,14 +350,22 @@ def _is_sensitive_detail_key(key: Any) -> bool:
 
 def _sanitize_command(command: Sequence[str]) -> list[str]:
     redacted: list[str] = []
-    for index, token in enumerate(command):
-        previous = command[index - 1].lower() if index else ""
-        if previous in {"-p", "--password", "--secret"} or _is_sensitive_detail_key(
-            token
-        ):
+    redact_next = False
+
+    for token in command:
+        text = str(token)
+
+        if redact_next:
             redacted.append(REDACTED_SECRET)
-        else:
-            redacted.append(str(token))
+            redact_next = False
+            continue
+
+        if text.lower() in SENSITIVE_COMMAND_OPTIONS:
+            redacted.append(text)
+            redact_next = True
+            continue
+
+        redacted.append(text)
     return redacted
 
 def _sanitize_text(
@@ -375,7 +409,11 @@ def _sanitize_text(
     return "\n".join(sanitized_lines)
 
 
-def _sanitize_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
+def _sanitize_details(
+    details: Mapping[str, Any] | None,
+    *,
+    sensitive_values: Sequence[str] = (),
+) -> dict[str, Any]:
     def sanitize_value(value: Any) -> Any:
         if isinstance(value, Mapping):
             return {
@@ -392,16 +430,19 @@ def _sanitize_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
 
         if isinstance(value, tuple):
             return tuple(sanitize_value(item) for item in value)
+        
+        if isinstance(value, set):
+            return {sanitize_value(item) for item in value}
 
         if isinstance(value, str):
-            return _sanitize_text(value)
-
+            return _sanitize_text(value, sensitive_values=sensitive_values)
         return value
 
     return {
         str(key): (
-            REDACTED_SECRET if _is_sensitive_detail_key(key) else sanitize_value(value)
-        )
+            REDACTED_SECRET
+            if _is_sensitive_detail_key(key)
+            else sanitize_value(value)        )
         for key, value in dict(details or {}).items()
     }
 
@@ -550,6 +591,15 @@ def _build_aging_command(
 def _build_user_exists_command(username: str) -> list[str]:
     return [CMD_GETENT, "passwd", username]
 
+@dataclass(frozen=True, slots=True)
+class UserIdentity:
+    username: str
+    uid: int
+
+    @property
+    def is_administrative(self) -> bool:
+        return self.uid == 0
+
 class LinuxPasswordManager:
     def __init__(
         self, executor: CommandExecutor | None = None, *, dry_run: bool = False
@@ -578,16 +628,14 @@ class LinuxPasswordManager:
             field_name="allow_admin",
             default=False,
         )
+        sensitive_values = (password,) if password else ()
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         administrative_target = self.ensure_not_admin_password_target(
             username,
             operation=ACTION_CHANGE_PASSWORD,
             allow_admin=allow_admin,
         )
-        sensitive_values = (password,) if password else ()
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        if validate_user:
-            self.ensure_user_exists(username)
         if password is not None:
             _validate_password_strength(username, password)
         elif not effective_dry_run:
@@ -629,7 +677,6 @@ class LinuxPasswordManager:
                 forced = self.force_password_change(
                     username,
                     dry_run=effective_dry_run,
-                    validate_user=False,
                     allow_admin=allow_admin,
                 )
             except (
@@ -648,12 +695,14 @@ class LinuxPasswordManager:
                             "force_change_applied": False,
                             "manual_intervention_required": True,
                             "recommended_action": (
-                                f"Run chage -d 0 {username} after resolving the reported error."
+                                f"Run chage -d 0 {username} "
+                                "after resolving the reported error."
                             ),
                             "primary_result": result.to_dict(),
                             "secondary_error_type": type(exc).__name__,
                             "secondary_error": getattr(exc, "details", {}),
-                        }
+                        },
+                        sensitive_values=sensitive_values,                        
                     ),
                     cause=exc,
                 ) from exc
@@ -735,14 +784,12 @@ class LinuxPasswordManager:
         username: str,
         *,
         dry_run: bool | None = None,
-        validate_user: bool = True,
         allow_admin: bool = False,
     ) -> SystemResult:
         return self.expire_password(
             username,
             action=ACTION_FORCE_PASSWORD_CHANGE,
             dry_run=dry_run,
-            validate_user=validate_user,
             allow_admin=allow_admin,
         )
     
@@ -752,20 +799,17 @@ class LinuxPasswordManager:
         *,
         action: str = ACTION_EXPIRE_PASSWORD,
         dry_run: bool | None = None,
-        validate_user: bool = True,
         allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         administrative_target = self.ensure_not_admin_password_target(
             username,
             operation=action,
             allow_admin=allow_admin,
         )
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        if validate_user:
-            self.ensure_user_exists(username)
         command = _build_expire_password_command(username)
         result = self.executor.execute(
             command,
@@ -796,20 +840,17 @@ class LinuxPasswordManager:
         username: str,
         *,
         dry_run: bool | None = None,
-        validate_user: bool = True,
         allow_admin: bool = False,
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         administrative_target = self.ensure_not_admin_password_target(
             username,
             operation=ACTION_CLEAR_PASSWORD_EXPIRATION,
             allow_admin=allow_admin,
         )
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        if validate_user:
-            self.ensure_user_exists(username)
         command = _build_clear_expiration_command(username)
         result = self.executor.execute(
             command, 
@@ -843,21 +884,19 @@ class LinuxPasswordManager:
         username: str,
         *,
         dry_run: bool | None = None,
-        validate_user: bool = True,
         allow_admin: bool = False,
-        strategy: PasswordCommandStrategy = PasswordCommandStrategy.PASSWD,
+        strategy: PasswordCommandStrategy | str = PasswordCommandStrategy.PASSWD,
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        strategy = _normalize_password_strategy(strategy)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         administrative_target = self.ensure_not_admin_password_target(
             username,
             operation=ACTION_LOCK_PASSWORD,
             allow_admin=allow_admin,
         )
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        if validate_user:
-            self.ensure_user_exists(username)
         command = _build_lock_password_command(username, strategy)
         result = self.executor.execute(
             command,
@@ -886,21 +925,19 @@ class LinuxPasswordManager:
         username: str,
         *,
         dry_run: bool | None = None,
-        validate_user: bool = True,
         allow_admin: bool = False,
-        strategy: PasswordCommandStrategy = PasswordCommandStrategy.PASSWD,
+        strategy: PasswordCommandStrategy | str = PasswordCommandStrategy.PASSWD,
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        strategy = _normalize_password_strategy(strategy)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         administrative_target = self.ensure_not_admin_password_target(
             username,
             operation=ACTION_UNLOCK_PASSWORD,
             allow_admin=allow_admin,
         )
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        if validate_user:
-            self.ensure_user_exists(username)
         command = _build_unlock_password_command(username, strategy)
         result = self.executor.execute(
             command,
@@ -1098,14 +1135,13 @@ class LinuxPasswordManager:
     ) -> SystemResult:
         username = _normalize_username(username)
         allow_admin = _coerce_bool(allow_admin, field_name="allow_admin", default=False)
+        effective_dry_run = self._effective_dry_run(dry_run)
+        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
         administrative_target = self.ensure_not_admin_password_target(
             username,
             operation=action,
             allow_admin=allow_admin,
         )
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        self.ensure_user_exists(username)
         values = self._policy_values(
             policy, 
             minimum_days=minimum_days, 
@@ -1146,20 +1182,36 @@ class LinuxPasswordManager:
         )
 
     def check_required_commands(
-        self, *, raise_on_missing: bool = True
-    ) -> dict[str, bool]:
+        self,
+        *,
+        raise_on_missing: bool = True,    ) -> dict[str, bool]:
         results: dict[str, bool] = {}
+
         for binary in REQUIRED_COMMANDS:
-            result = self.executor.check_dependency(binary, raise_on_missing=False)
-            results[binary] = result.ok
-            if raise_on_missing and not result.ok:
-                raise ResourceNotFoundError(
-                    "Required password command is unavailable.",
-                    details={"binary": binary},
-                )
-            return results
-        
-    def get_user_uid(self, username: str) -> int:
+            dependency_result = self.executor.check_dependency(
+                binary,
+                raise_on_missing=False,
+            )
+            results[binary] = dependency_result.ok
+
+        missing = [
+            binary
+            for binary, available in results.items()
+            if not available
+        ]
+
+        if raise_on_missing and missing:
+            raise ResourceNotFoundError(
+                "Required password commands are unavailable.",
+                details={
+                    "missing_binaries": missing,
+                    "dependency_status": results,
+                },
+            )
+
+        return results
+
+    def get_user_identity(self, username: str) -> UserIdentity:
         username = _normalize_username(username)
 
         result = self.executor.execute(
@@ -1209,8 +1261,10 @@ class LinuxPasswordManager:
                 },
             )
 
-        return uid
+        return UserIdentity(username=username, uid=uid)
 
+    def get_user_uid(self, username: str) -> int:
+        return self.get_user_identity(username).uid
 
     def ensure_user_exists(self, username: str) -> None:
         username = _normalize_username(username)
@@ -1250,15 +1304,15 @@ class LinuxPasswordManager:
             default=False,
         )
 
-        uid = self.get_user_uid(username)
-        administrative_target = uid == 0
+        identity = self.get_user_identity(username)
+        administrative_target = identity.is_administrative
 
         if administrative_target and not allow_admin:
             raise PasswordChangeError(
                 "Operation is blocked for an administrative account.",
                 details={
                     "username": username,
-                    "uid": uid,
+                    "uid": identity.uid,
                     "operation": operation,
                     "administrative_target": True,
                     "allow_admin_required": True,
@@ -1319,8 +1373,14 @@ class LinuxPasswordManager:
     ) -> None:
         if result.ok:
             return
-        result.details = _sanitize_details(result.details)
-        details = _sanitize_details(result.details)
+        result.details = _sanitize_details(
+            result.details,
+            sensitive_values=sensitive_values,
+        )
+        details = _sanitize_details(
+            result.details,
+            sensitive_values=sensitive_values,
+        )
         if result.execution:
             result.execution.command = _sanitize_command(result.execution.command or [])
             result.execution.stdout = _sanitize_text(
@@ -1387,7 +1447,8 @@ class LinuxPasswordManager:
                 "secret": REDACTED_SECRET,
                 "secret_redacted": True,
                 "technical_layer": "system/linux_passwords.py",
-            }
+            },
+            sensitive_values=sensitive_values,
         )
         if result.execution:
             result.execution.command = _sanitize_command(result.execution.command or [])
@@ -1575,10 +1636,16 @@ __all__ = [
     "ACTION_SET_PASSWORD_MIN_DAYS",
     "ACTION_SET_PASSWORD_WARNING_DAYS",
     "ACTION_SET_PASSWORD_INACTIVE_DAYS",
+    "STATUS_ACTIVE",
+    "STATUS_LOCKED",
+    "STATUS_UNKNOWN",
+    "STATUS_EXPIRED",
+    "STATUS_NO_PASSWORD",
     "LinuxPasswordManager",
     "PasswordApplySpec",
     "PasswordCommandStrategy",
     "PasswordStatusInfo",
+    "UserIdentity",
     "REDACTED_SECRET",
     "REQUIRED_COMMANDS",
 ]
