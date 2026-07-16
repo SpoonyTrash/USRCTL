@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Any
 
 from ..utils.errors import CommandExecutionError, PolicyError
@@ -46,13 +47,38 @@ def _normalize_password_state(value: str | None) -> str:
     return STATUS_UNKNOWN
 
 
-def _normalize_chage_date(value: str | None) -> str | None:
+def _normalize_chage_iso_date(
+    value: str | None,
+    *,
+    field_name: str,
+) -> str | None:
     text = (value or "").strip()
-    if not text or text.lower() in {"never", "none"}:
+
+    if not text or text.lower() in {
+        "never",
+        "none",
+    }:
         return None
-    if text.lower() in {"password must be changed", "must be changed"}:
+
+    if text.lower() in {
+        "password must be changed",
+        "must be changed",
+    }:
         return EXPIRE_IMMEDIATELY_VALUE
-    return text
+
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise CommandExecutionError(
+            "Invalid ISO date in chage output.",
+            details={
+                "field": field_name,
+                "value": text,
+            },
+            cause=exc,
+        ) from exc
+
+    return parsed.isoformat()
 
 
 def _normalize_policy_days(
@@ -79,6 +105,35 @@ def _normalize_policy_days(
             details={"field": field_name, "value": days},
         )
     return days
+
+
+def _calculate_inactive_days(
+    password_expires_at: str | None,
+    password_inactive_at: str | None,
+) -> int | None:
+    if (
+        password_expires_at is None
+        or password_inactive_at is None
+        or password_expires_at == EXPIRE_IMMEDIATELY_VALUE
+        or password_inactive_at == EXPIRE_IMMEDIATELY_VALUE
+    ):
+        return None
+
+    expires_date = date.fromisoformat(password_expires_at)
+    inactive_date = date.fromisoformat(password_inactive_at)
+
+    inactive_days = (inactive_date - expires_date).days
+
+    if inactive_days < 0:
+        raise CommandExecutionError(
+            "Password inactive date precedes password expiration date.",
+            details={
+                "password_expires_at": password_expires_at,
+                "password_inactive_at": password_inactive_at,
+            },
+        )
+
+    return inactive_days
 
 
 def _parse_chage_output(
@@ -123,32 +178,39 @@ def _parse_chage_output(
     warning_days = _normalize_policy_days(
         fields[CHAGE_WARNING_DAYS], field_name=CHAGE_WARNING_DAYS, allow_never=False
     )
-    inactive_raw = str(fields[CHAGE_PASSWORD_INACTIVE]).strip()
-    inactive_days = (
-        None
-        if inactive_raw.lower() in {"", "never"}
-        else _normalize_policy_days(
-            inactive_raw,
-            field_name=CHAGE_PASSWORD_INACTIVE,
-            allow_never=True,
-        )
+    password_expires_at = _normalize_chage_iso_date(
+        fields.get(CHAGE_PASSWORD_EXPIRES),
+        field_name=CHAGE_PASSWORD_EXPIRES,
     )
-    expires = _normalize_chage_date(fields.get(CHAGE_PASSWORD_EXPIRES))
-    last_changed = _normalize_chage_date(fields.get(CHAGE_LAST_CHANGE))
+    password_inactive_at = _normalize_chage_iso_date(
+        fields.get(CHAGE_PASSWORD_INACTIVE),
+        field_name=CHAGE_PASSWORD_INACTIVE,
+    )
+    account_expires_at = _normalize_chage_iso_date(
+        fields.get(CHAGE_ACCOUNT_EXPIRES),
+        field_name=CHAGE_ACCOUNT_EXPIRES,
+    )
+    last_changed_at = _normalize_chage_iso_date(
+        fields.get(CHAGE_LAST_CHANGE),
+        field_name=CHAGE_LAST_CHANGE,
+    )
+    inactive_days = _calculate_inactive_days(
+        password_expires_at,
+        password_inactive_at,
+    )
     expired = (
-        expires == EXPIRE_IMMEDIATELY_VALUE
-        or str(fields.get(CHAGE_LAST_CHANGE, "")).strip().lower()
-        == "password must be changed"
+        password_expires_at == EXPIRE_IMMEDIATELY_VALUE
+        or last_changed_at == EXPIRE_IMMEDIATELY_VALUE
     )
     return PasswordStatusInfo(
         username=username,
-        status=STATUS_EXPIRED if expired else STATUS_ACTIVE,
+        status=(STATUS_EXPIRED if expired else STATUS_ACTIVE),
         expired=expired,
         requires_change=expired,
-        last_changed=last_changed,
-        password_expires=expires,
-        password_inactive=_normalize_chage_date(fields.get(CHAGE_PASSWORD_INACTIVE)),
-        account_expires=_normalize_chage_date(fields.get(CHAGE_ACCOUNT_EXPIRES)),
+        last_changed=last_changed_at,
+        password_expires=password_expires_at,
+        password_inactive_at=password_inactive_at,
+        account_expires=account_expires_at,
         minimum_days=minimum_days,
         maximum_days=maximum_days,
         warning_days=warning_days,

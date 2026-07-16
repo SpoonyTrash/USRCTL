@@ -45,7 +45,12 @@ def _build_clear_expiration_command(username: str) -> list[str]:
 
 
 def _build_query_expiration_command(username: str) -> list[str]:
-    return [CMD_CHAGE, "-l", username]
+    return [
+        CMD_CHAGE,
+        "--list",
+        "--iso8601",
+        username,
+    ]
 
 
 def _build_passwd_status_command(username: str) -> list[str]:
