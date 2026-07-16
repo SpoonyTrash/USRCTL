@@ -427,7 +427,7 @@ class LinuxPasswordManager:
                 "Generated password is required.",
                 details={"username": username, "password": REDACTED_SECRET},
             )
-        sensitive_values = (generated_password,) if generated_password else ()
+        sensitive_values = (generated_password,)
         result = self.change_password(
             username,
             generated_password,
@@ -778,9 +778,9 @@ class LinuxPasswordManager:
             )
         except CommandExecutionError:
             raise
-        except Exception as exc:
+        except PolicyError as exc:
             raise CommandExecutionError(
-                "Unexpected chage output.",
+                "Invalid password aging values in chage output.",
                 details={"username": username},
                 cause=exc,
             ) from exc
@@ -1324,21 +1324,24 @@ class LinuxPasswordManager:
     ) -> SystemResult:
         result.action = action
         result.target = username
+        details: dict[str, Any] = {
+            **result.details,
+            "action": action,
+            "target_user": username,
+            "administrative_target": administrative_target,
+            "allow_admin": allow_admin,
+            "changes_applied": (
+                changes if result.changed and not result.dry_run else []
+            ),
+            "projected_changes": (changes if result.dry_run else []),
+            "technical_layer": "system/linux_password.py",
+        }
+        if sensitive_values:
+            details["secret"] = REDACTED_SECRET
+            details["secret_redacted"] = True
+
         result.details = _sanitize_details(
-            {
-                **result.details,
-                "action": action,
-                "target_user": username,
-                "administrative_target": administrative_target,
-                "allow_admin": allow_admin,
-                "changes_applied": (
-                    changes if result.changed and not result.dry_run else []
-                ),
-                "projected_changes": (changes if result.dry_run else []),
-                "secret": REDACTED_SECRET,
-                "secret_redacted": True,
-                "technical_layer": "system/linux_password.py",
-            },
+            details,
             sensitive_values=sensitive_values,
         )
         if result.execution:

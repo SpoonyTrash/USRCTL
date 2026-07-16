@@ -293,7 +293,10 @@ class PasswordPolicy(SecurityPolicy):
             if isinstance(self.inactive_days, bool):
                 raise ValidationError(
                     "inactive_days cannot be a boolean.",
-                    details={"field": "inactive_days"},
+                    details={
+                        "field": "inactive_days",
+                        "value": self.inactive_days,
+                    },
                 )
 
             if not isinstance(self.inactive_days, int):
@@ -309,7 +312,7 @@ class PasswordPolicy(SecurityPolicy):
 
             if self.inactive_days < -1:
                 raise ValidationError(
-                    "inactive_days must be -1 or greater.",
+                    "inactive_days must be -1 or a non-negative integer.",
                     details={
                         "field": "inactive_days",
                         "value": self.inactive_days,

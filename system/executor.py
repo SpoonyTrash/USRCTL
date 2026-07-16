@@ -538,19 +538,22 @@ class CommandExecutor:
   ) -> CommandResult:
     started = perf_counter()
     try:
-      completed = subprocess.run(
-        list(command),
-        input=stdin_data,
-        capture_output=capture_output,
-        text=True,
-        encoding=self.config.encoding,
-        errors="replace",
-        timeout=timeout,
-        env=dict(env),
-        cwd=str(cwd) if cwd else None,
-        check=False,
-        shell=use_shell
-      )
+      try:
+        completed = subprocess.run(
+          list(command),
+          input=stdin_data,
+          capture_output=capture_output,
+          text=True,
+          encoding=self.config.encoding,
+          errors="replace",
+          timeout=timeout,
+          env=dict(env),
+          cwd=str(cwd) if cwd else None,
+          check=False,
+          shell=use_shell
+        )
+      finally:
+        stdin_data = ""
       duration_ms = (perf_counter() - started) * 1000
       stdout = completed.stdout or ""
       stderr = completed.stderr or ""
