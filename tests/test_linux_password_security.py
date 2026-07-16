@@ -265,3 +265,118 @@ def test_execute_with_stdin_contract_does_not_serialize_secret() -> None:
     assert "UniqueSecret-ABC123" not in serialized
     assert result.details["stdin_supplied"] is True
     assert result.details["stdin_sensitive"] is True
+
+
+def test_change_password_secret_strategy_validation_has_no_name_error() -> None:
+    executor = FakeExecutor()
+    executor.execute_with_stdin.return_value = SystemResult(
+        ok=True,
+        status=ResultStatus.DRY_RUN,
+        action=ACTION_CHANGE_PASSWORD,
+        target="alice",
+        dry_run=True,
+        changed=False,
+        execution=ExecutionMetadata(command=["chpasswd"], return_code=0),
+    )
+    manager = LinuxPasswordManager(executor=executor, dry_run=True)
+
+    result = manager.change_password(
+        "alice",
+        "UniqueSecret-ABC123!",
+        dry_run=True,
+    )
+
+    assert result.dry_run is True
+
+
+def test_raise_if_failed_missing_user_classifier_is_precise() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+
+    for stderr in (
+        "unknown user: alice",
+        "user alice does not exist",
+    ):
+        result = SystemResult(
+            ok=False,
+            status=ResultStatus.FAILURE,
+            action="set_password_policy",
+            target="alice",
+            execution=ExecutionMetadata(
+                command=["chage", "alice"],
+                return_code=1,
+                stderr=stderr,
+            ),
+        )
+        with pytest.raises(UserNotFoundError):
+            manager._raise_if_failed(result, PasswordChangeError, "failed")
+
+    for stderr in (
+        "user configuration file does not exist",
+        "configuration file does not exist",
+    ):
+        result = SystemResult(
+            ok=False,
+            status=ResultStatus.FAILURE,
+            action="set_password_policy",
+            target="alice",
+            execution=ExecutionMetadata(
+                command=["chage", "alice"],
+                return_code=1,
+                stderr=stderr,
+            ),
+        )
+        with pytest.raises(PasswordChangeError):
+            manager._raise_if_failed(result, PasswordChangeError, "failed")
+
+
+def test_password_policy_serializes_inactive_days() -> None:
+    policy = PasswordPolicy(inactive_days=30)
+
+    assert policy.inactive_days == 30
+    assert policy.to_dict()["inactive_days"] == 30
+
+
+def test_system_result_contract_is_mutable() -> None:
+    result = SystemResult(
+        ok=True,
+        status=ResultStatus.SUCCESS,
+        action="original",
+        message="original",
+        target="bob",
+        details={"original": True},
+        impact=ImpactMetadata(level=ImpactLevel.LOW),
+    )
+
+    result.action = "updated"
+    result.message = "updated"
+    result.target = "alice"
+    result.details = {"updated": True}
+    result.impact.level = ImpactLevel.HIGH
+
+    assert result.action == "updated"
+    assert result.impact.level is ImpactLevel.HIGH
+
+
+def test_execution_metadata_contract_is_mutable() -> None:
+    result = SystemResult(
+        ok=True,
+        status=ResultStatus.SUCCESS,
+        action="test",
+        execution=ExecutionMetadata(command=["before"], stdout="before", stderr="before"),
+    )
+
+    assert result.execution is not None
+    result.execution.command = ["after"]
+    result.execution.stdout = "after"
+    result.execution.stderr = "after"
+
+    assert result.execution.command == ["after"]
+    assert result.execution.stdout == "after"
+    assert result.execution.stderr == "after"
+
+
+def test_every_public_export_exists() -> None:
+    import USRCTL.system.linux_password as module
+
+    for exported_name in module.__all__:
+        assert hasattr(module, exported_name)

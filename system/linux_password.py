@@ -1,8 +1,5 @@
 import os
-import re
 from dataclasses import dataclass, field
-from enum import StrEnum
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .executor import CommandExecutor, ExecutorConfig
@@ -23,15 +20,12 @@ from ..utils.errors import (
 )
 from ..utils.validators import validate_username
 from .password_security import (
-    FORBIDDEN_PASSWORD_CODEPOINTS,
-    FORBIDDEN_PASSWORD_CODEPOINT_NAMES,
     _normalize_password_strategy,
     _validate_password_strength,
     _validate_password_strength_config,
     _validate_password_transport,
 )
 from .password_parsers import (
-    _normalize_chage_date,
     _normalize_password_state,
     _normalize_policy_days,
     _parse_chage_output,
@@ -49,63 +43,43 @@ from .password_commands import (
     _build_user_exists_command,
 )
 from .password_sanitizer import (
-    _is_sensitive_detail_key,
     _sanitize_command,
     _sanitize_details,
     _sanitize_text,
     _split_sensitive_option,
 )
 
-
-CMD_PASSWD = "passwd"
-CMD_CHPASSWD = "chpasswd"
-CMD_GETENT = "getent"
-CMD_CHAGE = "chage"
-CMD_USERMOD = "usermod"
-SHADOW_PATH = Path("/etc/shadow")
-
-ACTION_CHANGE_PASSWORD = "change_password"
-ACTION_APPLY_GENERATED_PASSWORD = "apply_generated_password"
-ACTION_EXPIRE_PASSWORD = "expire_password"
-ACTION_FORCE_PASSWORD_CHANGE = "force_password_change"
-ACTION_CLEAR_PASSWORD_EXPIRATION = "clear_password_expiration"
-ACTION_LOCK_PASSWORD = "lock_password"
-ACTION_UNLOCK_PASSWORD = "unlock_password"
-ACTION_QUERY_PASSWORD_STATUS = "query_password_status"
-ACTION_QUERY_USER_IDENTITY = "query_user_identity"
-ACTION_SET_PASSWORD_POLICY = "set_password_policy"
-ACTION_SET_PASSWORD_MAX_DAYS = "set_password_max_days"
-ACTION_SET_PASSWORD_MIN_DAYS = "set_password_min_days"
-ACTION_SET_PASSWORD_WARNING_DAYS = "set_password_warning_days"
-ACTION_SET_PASSWORD_INACTIVE_DAYS = "set_password_inactive_days"
-
-STATUS_ACTIVE = "active"
-STATUS_LOCKED = "locked"
-STATUS_UNKNOWN = "unknown"
-STATUS_EXPIRED = "expired"
-STATUS_NO_PASSWORD = "no_password"
-
-CHAGE_LAST_CHANGE = "last_password_change"
-CHAGE_PASSWORD_EXPIRES = "password_expires"
-CHAGE_PASSWORD_INACTIVE = "password_inactive"
-CHAGE_ACCOUNT_EXPIRES = "account_expires"
-CHAGE_MIN_DAYS = "minimum_days_between_password_change"
-CHAGE_MAX_DAYS = "maximum_days_between_password_change"
-CHAGE_WARNING_DAYS = "warning_days_before_password_expires"
-CHAGE_EXPECTED_FIELDS = (
-    CHAGE_LAST_CHANGE,
-    CHAGE_PASSWORD_EXPIRES,
-    CHAGE_PASSWORD_INACTIVE,
-    CHAGE_ACCOUNT_EXPIRES,
-    CHAGE_MIN_DAYS,
-    CHAGE_MAX_DAYS,
-    CHAGE_WARNING_DAYS,
+from .password_constants import (
+    ACTION_APPLY_GENERATED_PASSWORD,
+    ACTION_CHANGE_PASSWORD,
+    ACTION_CLEAR_PASSWORD_EXPIRATION,
+    ACTION_EXPIRE_PASSWORD,
+    ACTION_FORCE_PASSWORD_CHANGE,
+    ACTION_LOCK_PASSWORD,
+    ACTION_QUERY_PASSWORD_STATUS,
+    ACTION_QUERY_USER_IDENTITY,
+    ACTION_SET_PASSWORD_INACTIVE_DAYS,
+    ACTION_SET_PASSWORD_MAX_DAYS,
+    ACTION_SET_PASSWORD_MIN_DAYS,
+    ACTION_SET_PASSWORD_POLICY,
+    ACTION_SET_PASSWORD_WARNING_DAYS,
+    ACTION_UNLOCK_PASSWORD,
+    CMD_GETENT,
+    REDACTED_SECRET,
+    REQUIRED_COMMANDS,
+    SENSITIVE_COMMAND_OPTIONS,
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    STATUS_LOCKED,
+    STATUS_NO_PASSWORD,
+    STATUS_UNKNOWN,
+)
+from .password_types import (
+    PasswordCommandStrategy,
+    PasswordStatusInfo,
+    UserIdentity,
 )
 
-
-EXPIRE_IMMEDIATELY_VALUE = "0"
-REDACTED_SECRET = "[REDACTED]"
-REQUIRED_COMMANDS = (CMD_PASSWD, CMD_CHPASSWD, CMD_CHAGE, CMD_USERMOD, CMD_GETENT)
 
 
 @dataclass(slots=True)
@@ -152,42 +126,6 @@ class PasswordApplySpec:
             "dry_run": self.dry_run,
             "allow_admin": self.allow_admin,
         }
-
-
-@dataclass(slots=True)
-class PasswordStatusInfo:
-    username: str
-    status: str = STATUS_UNKNOWN
-    locked: bool = False
-    expired: bool = False
-    requires_change: bool = False
-    last_changed: str | None = None
-    password_expires: str | None = None
-    password_inactive: str | None = None
-    account_expires: str | None = None
-    minimum_days: int | None = None
-    maximum_days: int | None = None
-    warning_days: int | None = None
-    inactive_days: int | None = None
-    raw_fields: dict[str, Any] = field(default_factory=dict)
-
-    def to_policy_dict(self) -> dict[str, Any]:
-        return {
-            "target": self.username,
-            "last_changed_at": self.last_changed,
-            "min_password_age_days": self.minimum_days,
-            "max_password_age_days": self.maximum_days,
-            "warning_days": self.warning_days,
-            "inactive_days": self.inactive_days,
-            "password_expired": self.expired,
-            "force_password_change": self.requires_change,
-            "password_status": self.status,
-        }
-
-
-class PasswordCommandStrategy(StrEnum):
-    PASSWD = "passwd"
-    USERMOD = "usermod"
 
 
 def _normalize_username(username: str) -> str:
@@ -243,14 +181,38 @@ def _normalize_password_policy_field(value: Any, *, field_name: str) -> int | No
     )
 
 
-@dataclass(frozen=True, slots=True)
-class UserIdentity:
-    username: str
-    uid: int
 
-    @property
-    def is_administrative(self) -> bool:
-        return self.uid == 0
+def _stderr_reports_missing_user(
+    stderr: str,
+) -> bool:
+    normalized = stderr.strip().lower()
+
+    exact_prefixes = (
+        "unknown user",
+        "user not found",
+    )
+
+    if normalized.startswith(exact_prefixes):
+        return True
+
+    if (
+        normalized.startswith("user ")
+        and normalized.endswith(" does not exist")
+    ):
+        middle = normalized[
+            len("user "):-len(" does not exist")
+        ].strip(" '\"")
+        return bool(middle) and " " not in middle
+
+    if ": user " in normalized:
+        return _stderr_reports_missing_user(
+            f"user {normalized.split(': user ', 1)[1]}"
+        )
+
+    return (
+        "does not exist in /etc/passwd" in normalized
+        or "does not exist in the passwd database" in normalized
+    )
 
 
 class LinuxPasswordManager:
@@ -1231,15 +1193,6 @@ class LinuxPasswordManager:
             "executable file not found",
         )
 
-        missing_user_markers = (
-            "user does not exist",
-            "unknown user",
-            "unknown user:",
-            "user not found",
-            "does not exist in /etc/passwd",
-            "does not exist in the passwd database",
-        )
-
         if any(marker in stderr for marker in missing_command_markers):
             raise ResourceNotFoundError(
                 "Required command is unavailable.",
@@ -1254,8 +1207,7 @@ class LinuxPasswordManager:
             command_name = command.split(maxsplit=1)[0] if command else ""
 
         if (
-            any(marker in stderr for marker in missing_user_markers)
-            or re.search(r"\buser\b.*\bdoes not exist\b", stderr)
+            _stderr_reports_missing_user(stderr)
             or (
                 command_name == CMD_GETENT
                 and result.execution is not None

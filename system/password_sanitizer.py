@@ -1,9 +1,11 @@
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-SHADOW_PATH = Path("/etc/shadow")
-REDACTED_SECRET = "[REDACTED]"
-MAX_SANITIZE_DEPTH = 20
+from .password_constants import (
+    MAX_SANITIZE_DEPTH,
+    REDACTED_SECRET,
+    SENSITIVE_COMMAND_OPTIONS,
+    SHADOW_PATH,
+)
 SENSITIVE_EXACT_KEYS = frozenset(
     {
         "password",
@@ -32,15 +34,6 @@ SENSITIVE_KEY_SUFFIXES = (
     "_credential_value",
     "_stdin",
     "_stdin_data",
-)
-
-SENSITIVE_COMMAND_OPTIONS = frozenset(
-    {
-        "-p",
-        "--password",
-        "--secret",
-        "--password-hash",
-    }
 )
 
 

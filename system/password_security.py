@@ -1,18 +1,11 @@
-from typing import TYPE_CHECKING
-
 from ..config import PasswordStrengthConfig
 from ..utils.errors import ValidationError, WeakPasswordError
-from .password_sanitizer import REDACTED_SECRET
-
-if TYPE_CHECKING:
-    from .linux_password import PasswordCommandStrategy
-
-FORBIDDEN_PASSWORD_CODEPOINTS = frozenset({"\n", "\r", "\x00"})
-FORBIDDEN_PASSWORD_CODEPOINT_NAMES = {
-    "\n": "LINE_FEED",
-    "\r": "CARRIAGE_RETURN",
-    "\x00": "NULL_BYTE",
-}
+from .password_constants import (
+    FORBIDDEN_PASSWORD_CODEPOINT_NAMES,
+    FORBIDDEN_PASSWORD_CODEPOINTS,
+    REDACTED_SECRET,
+)
+from .password_types import PasswordCommandStrategy
 
 
 def _validate_password_transport(password: str) -> None:
@@ -152,21 +145,24 @@ def _validate_password_strength(
 
 
 def _normalize_password_strategy(
-    value: "PasswordCommandStrategy | str",
-) -> "PasswordCommandStrategy":
-    from .linux_password import PasswordCommandStrategy
-
+    value: PasswordCommandStrategy | str,
+) -> PasswordCommandStrategy:
     if isinstance(value, PasswordCommandStrategy):
         return value
 
     try:
-        return PasswordCommandStrategy(str(value).strip().lower())
+        return PasswordCommandStrategy(
+            str(value).strip().lower()
+        )
     except ValueError as exc:
         raise ValidationError(
             "Unsupported password command strategy.",
             details={
                 "strategy": str(value),
-                "allowed": [strategy.value for strategy in PasswordCommandStrategy],
+                "allowed": [
+                    strategy.value
+                    for strategy in PasswordCommandStrategy
+                ],
             },
             cause=exc,
         ) from exc

@@ -13,6 +13,7 @@ from models.user import (
 )
 from system.executor import CommandExecutor
 from system.result import CommandResult, DryRunResult, ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
+from system.password_constants import CMD_PASSWD
 from utils.errors import (
     AccountLockError,
     CommandExecutionError,
@@ -33,8 +34,6 @@ CMD_USERMOD = "usermod"
 CMD_USERDEL = "userdel"
 CMD_ID = "id"
 CMD_GETENT = "getent"
-CMD_PASSWD = "passwd"
-
 PASSWD_PATH = Path("/etc/passwd")
 SHADOW_PATH = Path("/etc/shadow")
 GROUP_PATH = Path("/etc/group")

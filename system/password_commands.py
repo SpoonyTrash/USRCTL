@@ -1,39 +1,37 @@
+from .password_constants import (
+    CMD_CHAGE,
+    CMD_CHPASSWD,
+    CMD_GETENT,
+    CMD_PASSWD,
+    CMD_USERMOD,
+    EXPIRE_IMMEDIATELY_VALUE,
+)
 from .password_security import _validate_password_transport
-
-CMD_PASSWD = "passwd"
-CMD_CHPASSWD = "chpasswd"
-CMD_GETENT = "getent"
-CMD_CHAGE = "chage"
-CMD_USERMOD = "usermod"
-EXPIRE_IMMEDIATELY_VALUE = "0"
+from .password_types import PasswordCommandStrategy
 
 
 def _build_change_password_command() -> list[str]:
     return [CMD_CHPASSWD]
 
 
-def _build_lock_password_command(username: str, strategy=None) -> list[str]:
-    from .linux_password import PasswordCommandStrategy
-
-    if strategy is None:
-        strategy = PasswordCommandStrategy.PASSWD
-
+def _build_lock_password_command(
+    username: str,
+    strategy: PasswordCommandStrategy = PasswordCommandStrategy.PASSWD,
+) -> list[str]:
     return (
         [CMD_USERMOD, "-L", username]
-        if strategy == PasswordCommandStrategy.USERMOD
+        if strategy is PasswordCommandStrategy.USERMOD
         else [CMD_PASSWD, "-l", username]
     )
 
 
-def _build_unlock_password_command(username: str, strategy=None) -> list[str]:
-    from .linux_password import PasswordCommandStrategy
-
-    if strategy is None:
-        strategy = PasswordCommandStrategy.PASSWD
-
+def _build_unlock_password_command(
+    username: str,
+    strategy: PasswordCommandStrategy = PasswordCommandStrategy.PASSWD,
+) -> list[str]:
     return (
         [CMD_USERMOD, "-U", username]
-        if strategy == PasswordCommandStrategy.USERMOD
+        if strategy is PasswordCommandStrategy.USERMOD
         else [CMD_PASSWD, "-u", username]
     )
 

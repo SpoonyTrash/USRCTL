@@ -296,6 +296,17 @@ class PasswordPolicy(SecurityPolicy):
                     details={"field": "inactive_days"},
                 )
 
+            if not isinstance(self.inactive_days, int):
+                raise ValidationError(
+                    "inactive_days must be an integer.",
+                    details={
+                        "field": "inactive_days",
+                        "received_type": type(
+                            self.inactive_days
+                        ).__name__,
+                    },
+                )
+
             if self.inactive_days < -1:
                 raise ValidationError(
                     "inactive_days must be -1 or a non-negative integer.",
