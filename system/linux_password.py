@@ -9,6 +9,7 @@ from ..config import PasswordStrengthConfig
 from .result import ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
 from ..models.policy import PasswordPolicy, PolicyOrigin, PolicyStatus
 from ..utils.errors import (
+    AdministrativeAccountProtectionError,
     CommandExecutionError,
     ForcePasswordChangeError,
     InsufficientPermissionsError,
