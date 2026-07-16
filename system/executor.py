@@ -317,6 +317,13 @@ class CommandExecutor:
       is_dry_run=should_dry_run,
       metadata=metadata
     )
+    if stdin_data is not None:
+      audit_details.update(
+        {
+          "stdin_supplied": bool(stdin_data),
+          "stdin_sensitive": stdin_sensitive
+        }
+      )
 
     if self.config.validate_before_execute:
       self._validate_command_viability(prepared_command, shell_mode)
