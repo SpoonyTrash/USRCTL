@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -77,6 +78,12 @@ FORBIDDEN_PASSWORD_CODEPOINTS = frozenset(
         "\x00",
     }
 )
+FORBIDDEN_PASSWORD_CODEPOINT_NAMES = {
+    "\n": "LINE_FEED",
+    "\r": "CARRIAGE_RETURN",
+    "\x00": "NULL_BYTE",
+}
+MAX_SANITIZE_DEPTH = 20
 REQUIRED_COMMANDS = (CMD_PASSWD, CMD_CHPASSWD, CMD_CHAGE, CMD_USERMOD, CMD_GETENT)
 SENSITIVE_EXACT_KEYS = frozenset(
     {
@@ -364,23 +371,18 @@ def _validate_password_transport(password: str) -> None:
             },
         )
 
-    forbidden_names: list[str] = []
+    forbidden_characters = [
+        FORBIDDEN_PASSWORD_CODEPOINT_NAMES[character]
+        for character in FORBIDDEN_PASSWORD_CODEPOINTS
+        if character in password
+    ]
 
-    if "\n" in password:
-        forbidden_names.append("LINE_FEED")
-
-    if "\r" in password:
-        forbidden_names.append("CARRIAGE_RETURN")
-
-    if "\x00" in password:
-        forbidden_names.append("NULL_BYTE")
-
-    if forbidden_names:
+    if forbidden_characters:
         raise ValidationError(
             "Password contains characters that cannot be passed safely to chpasswd.",
             details={
                 "field": "password",
-                "forbidden_characters": forbidden_names,
+                "forbidden_characters": sorted(forbidden_characters),
                 "password": REDACTED_SECRET,
             },
         )
@@ -598,25 +600,40 @@ def _sanitize_details(
     *,
     sensitive_values: Sequence[str] = (),
 ) -> dict[str, Any]:
-    def sanitize_value(value: Any) -> Any:
+    def sanitize_value(
+        value: Any,
+        *,
+        depth: int,
+    ) -> Any:
+        if depth > MAX_SANITIZE_DEPTH:
+            return "[MAX_DEPTH_REACHED]"
+
         if isinstance(value, Mapping):
             return {
                 str(key): (
                     REDACTED_SECRET
                     if _is_sensitive_detail_key(key)
-                    else sanitize_value(item)
+                    else sanitize_value(item, depth=depth + 1)
                 )
                 for key, item in value.items()
             }
 
         if isinstance(value, list):
-            return [sanitize_value(item) for item in value]
+            return [sanitize_value(item, depth=depth + 1) for item in value]
 
         if isinstance(value, tuple):
-            return tuple(sanitize_value(item) for item in value)
+            return tuple(sanitize_value(item, depth=depth + 1) for item in value)
 
         if isinstance(value, set):
-            return {sanitize_value(item) for item in value}
+            sanitized_items = [
+                sanitize_value(item, depth=depth + 1)
+                for item in value
+            ]
+
+            return sorted(
+                sanitized_items,
+                key=lambda item: str(item),
+            )
 
         if isinstance(value, str):
             return _sanitize_text(value, sensitive_values=sensitive_values)
@@ -624,7 +641,9 @@ def _sanitize_details(
 
     return {
         str(key): (
-            REDACTED_SECRET if _is_sensitive_detail_key(key) else sanitize_value(value)
+            REDACTED_SECRET
+            if _is_sensitive_detail_key(key)
+            else sanitize_value(value, depth=0)
         )
         for key, value in dict(details or {}).items()
     }
@@ -838,28 +857,39 @@ class LinuxPasswordManager:
             operation=ACTION_CHANGE_PASSWORD,
             allow_admin=allow_admin,
         )
-        if password is not None:
+        if password is None:
+            if not effective_dry_run:
+                raise WeakPasswordError(
+                    "Password value is required.",
+                    details={
+                        "username": username,
+                        "password": REDACTED_SECRET,
+                    },
+                )
+        else:
             _validate_password_transport(password)
-            _validate_password_strength(username, password, self.password_strength)
-        elif not effective_dry_run:
-            _validate_password_strength(username, password, self.password_strength)
-        if not effective_dry_run and password is None:
-            raise WeakPasswordError(
-                "Password value is required.",
-                details={
-                    "username": username,
-                    "password": REDACTED_SECRET,
-                },
+            _validate_password_strength(
+                username,
+                password,
+                self.password_strength,
             )
         self.ensure_operation_does_not_expose_secrets(_build_change_password_command())
-        stdin_data = (
-            ""
-            if effective_dry_run
-            else _build_chpasswd_input(
+        if effective_dry_run:
+            stdin_data = ""
+        else:
+            if password is None:
+                raise WeakPasswordError(
+                    "Password value is required.",
+                    details={
+                        "username": username,
+                        "password": REDACTED_SECRET,
+                    },
+                )
+
+            stdin_data = _build_chpasswd_input(
                 username,
                 password,
             )
-        )
         result = self.executor.execute_with_stdin(
             _build_change_password_command(),
             stdin_data=stdin_data,
@@ -902,6 +932,7 @@ class LinuxPasswordManager:
                 ForcePasswordChangeError,
                 InsufficientPermissionsError,
                 CommandExecutionError,
+                ResourceNotFoundError,
                 UserNotFoundError,
             ) as exc:
                 raise PasswordChangeError(
@@ -1333,6 +1364,7 @@ class LinuxPasswordManager:
             min_password_age_days=info.minimum_days,
             max_password_age_days=info.maximum_days,
             warning_days=info.warning_days,
+            inactive_days=info.inactive_days,
             last_changed_at=info.last_changed,
             force_password_change=info.requires_change,
             password_expired=info.expired,
@@ -1519,10 +1551,19 @@ class LinuxPasswordManager:
             env={"LC_ALL": "C"},
         )
 
-        if not result.ok or not result.execution:
-            raise UserNotFoundError(
-                "User does not exist.",
-                details={"username": username},
+        self._raise_if_failed(
+            result,
+            CommandExecutionError,
+            "Unable to query user identity.",
+        )
+
+        if result.execution is None:
+            raise CommandExecutionError(
+                "User identity command completed without execution data.",
+                details={
+                    "username": username,
+                    "action": ACTION_QUERY_USER_IDENTITY,
+                },
             )
 
         record = result.execution.stdout.strip()
@@ -1565,15 +1606,34 @@ class LinuxPasswordManager:
 
     def ensure_user_exists(self, username: str) -> None:
         username = _normalize_username(username)
+
         result = self.executor.execute(
             _build_user_exists_command(username),
             action="ensure_user_exists",
             target=username,
             dry_run=False,
+            env={"LC_ALL": "C"},
         )
-        if not result.ok:
+
+        self._raise_if_failed(
+            result,
+            CommandExecutionError,
+            "Unable to verify whether the user exists.",
+        )
+
+        if result.execution is None:
+            raise CommandExecutionError(
+                "User existence command completed without execution data.",
+                details={
+                    "username": username,
+                    "action": "ensure_user_exists",
+                },
+            )
+
+        if not result.execution.stdout.strip():
             raise UserNotFoundError(
-                "User does not exist.", details={"username": username}
+                "User does not exist.",
+                details={"username": username},
             )
 
     def check_permissions(self) -> bool:
@@ -1686,14 +1746,12 @@ class LinuxPasswordManager:
     ) -> None:
         if result.ok:
             return
-        result.details = _sanitize_details(
-            result.details,
-            sensitive_values=sensitive_values,
-        )
         details = _sanitize_details(
             result.details,
             sensitive_values=sensitive_values,
         )
+
+        result.details = details
         if result.execution:
             result.execution.command = _sanitize_command(result.execution.command or [])
             result.execution.stdout = _sanitize_text(
@@ -1735,8 +1793,8 @@ class LinuxPasswordManager:
             "unknown user",
             "unknown user:",
             "user not found",
-            "does not exist",
             "does not exist in /etc/passwd",
+            "does not exist in the passwd database",
         )
 
         if any(marker in stderr for marker in missing_command_markers):
@@ -1745,7 +1803,23 @@ class LinuxPasswordManager:
                 details=details,
             )
 
-        if any(marker in stderr for marker in missing_user_markers):
+        command = details.get("command", [])
+        command_name = ""
+        if isinstance(command, list) and command:
+            command_name = str(command[0])
+        elif isinstance(command, str):
+            command_name = command.split(maxsplit=1)[0] if command else ""
+
+        if (
+            any(marker in stderr for marker in missing_user_markers)
+            or re.search(r"\buser\b.*\bdoes not exist\b", stderr)
+            or (
+                command_name == CMD_GETENT
+                and result.execution is not None
+                and result.execution.return_code not in (None, 0)
+                and not stderr
+            )
+        ):
             raise UserNotFoundError(
                 "User was not found during password operation.", details=details
             )
@@ -1899,7 +1973,7 @@ class LinuxPasswordManager:
                 "minimum_days": policy.min_password_age_days,
                 "maximum_days": policy.max_password_age_days,
                 "warning_days": policy.warning_days,
-                "inactive_days": None,
+                "inactive_days": policy.inactive_days,
             }
         else:
             policy_values = {

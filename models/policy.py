@@ -7,7 +7,8 @@ from utils.errors import (
     AccountExpirationError,
     InactivityPolicyError,
     LoginRestrictionError,
-    PolicyError
+    PolicyError,
+    ValidationError,
 )
 from utils.validators import validate_username
 
@@ -259,6 +260,7 @@ class PasswordPolicy(SecurityPolicy):
     min_password_age_days: int | None = RECOMMENDED_MIN_PASSWORD_AGE_DAYS
     max_password_age_days: int | None = RECOMMENDED_MAX_PASSWORD_AGE_DAYS
     warning_days: int | None = DEFAULT_WARNING_DAYS
+    inactive_days: int | None = None
     last_changed_at: date | None = None
     force_password_change: bool = False
     password_expired: bool | None = None
@@ -270,6 +272,7 @@ class PasswordPolicy(SecurityPolicy):
         min_password_age_days: int | None = RECOMMENDED_MIN_PASSWORD_AGE_DAYS,
         max_password_age_days: int | None = RECOMMENDED_MAX_PASSWORD_AGE_DAYS,
         warning_days: int | None = DEFAULT_WARNING_DAYS,
+        inactive_days: int | None = None,
         last_changed_at: date | str | None = None,
         force_password_change: bool = False,
         password_expired: bool | None = None,
@@ -285,6 +288,22 @@ class PasswordPolicy(SecurityPolicy):
         self.min_password_age_days = _validate_optional_days(min_password_age_days, "min_password_age_days")
         self.max_password_age_days = _validate_optional_days(max_password_age_days, "max_password_age_days")
         self.warning_days = _validate_optional_days(warning_days, "warning_days")
+        self.inactive_days = inactive_days
+        if self.inactive_days is not None:
+            if isinstance(self.inactive_days, bool):
+                raise ValidationError(
+                    "inactive_days cannot be a boolean.",
+                    details={"field": "inactive_days"},
+                )
+
+            if self.inactive_days < -1:
+                raise ValidationError(
+                    "inactive_days must be -1 or a non-negative integer.",
+                    details={
+                        "field": "inactive_days",
+                        "value": self.inactive_days,
+                    },
+                )
         self.last_changed_at = _parse_date(last_changed_at, "last_changed_at")
         self.force_password_change = _coerce_bool(force_password_change, field_name="force_password_change", default=False)
         self.password_expired = (None if password_expired is None else _coerce_bool(password_expired, field_name="password_expired"))
@@ -326,6 +345,7 @@ class PasswordPolicy(SecurityPolicy):
                 "min_password_age_days": self.min_password_age_days,
                 "max_password_age_days": self.max_password_age_days,
                 "warning_days": self.warning_days,
+                "inactive_days": self.inactive_days,
                 "last_changed_at": _date_to_str(self.last_changed_at),
                 "password_expires_at": _date_to_str(self.password_expires_at),
                 "force_password_change": self.force_password_change,
