@@ -309,7 +309,7 @@ class PasswordPolicy(SecurityPolicy):
 
             if self.inactive_days < -1:
                 raise ValidationError(
-                    "inactive_days must be -1 or a non-negative integer.",
+                    "inactive_days must be -1 or greater.",
                     details={
                         "field": "inactive_days",
                         "value": self.inactive_days,
@@ -1200,4 +1200,3 @@ __all__ = [
     "PolicyDiff",
 
 ]
-

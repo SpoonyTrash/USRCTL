@@ -268,13 +268,8 @@ class LinuxPasswordManager:
             field_name="allow_admin",
             default=False,
         )
-        sensitive_values = (password,) if password else ()
-        effective_dry_run = self._effective_dry_run(dry_run)
-        self._ensure_real_mutation_allowed(dry_run=effective_dry_run)
-        administrative_target = self.ensure_not_admin_password_target(
-            username,
-            operation=ACTION_CHANGE_PASSWORD,
-            allow_admin=allow_admin,
+        effective_dry_run = self._effective_dry_run(
+            dry_run
         )
         if password is None:
             raise WeakPasswordError(
@@ -282,7 +277,22 @@ class LinuxPasswordManager:
                 details={"username": username, "password": REDACTED_SECRET},
             )
         _validate_password_transport(password)
-        _validate_password_strength(username, password, self.password_strength)
+        _validate_password_strength(
+            username,
+            password,
+            self.password_strength,
+        )
+        sensitive_values = (password,)
+        self._ensure_real_mutation_allowed(
+            dry_run=effective_dry_run,
+        )
+        administrative_target = (
+            self.ensure_not_admin_password_target(
+                username,
+                operation=ACTION_CHANGE_PASSWORD,
+                allow_admin=allow_admin,
+            )
+        )
         self.ensure_operation_does_not_expose_secrets(_build_change_password_command())
         stdin_data = (
             "" if effective_dry_run else _build_chpasswd_input(username, password)
@@ -332,23 +342,42 @@ class LinuxPasswordManager:
                 ResourceNotFoundError,
                 UserNotFoundError,
             ) as exc:
+                password_changed = (
+                    not result.dry_run
+                    and result.is_effectively_ok
+                )
+                password_change_projected = (
+                    result.dry_run
+                    and result.is_effectively_ok
+                )
+                failure_details: dict[str, Any] = {
+                    "username": username,
+                    "partial_success": password_changed,
+                    "simulation_partial_success": password_change_projected,
+                    "password_changed": password_changed,
+                    "password_change_projected": password_change_projected,
+                    "force_change_applied": False,
+                    "force_change_projected": False,
+                    "manual_intervention_required": password_changed,
+                    "primary_result": result.to_dict(),
+                    "secondary_error_type": type(exc).__name__,
+                    "secondary_error": getattr(exc, "details", {}),
+                }
+                if password_changed:
+                    failure_details["recommended_action"] = (
+                        f"Run chage -d 0 {username} "
+                        "after resolving the reported error."
+                    )
+                failure_message = (
+                    "Password changed, but forcing a change at next login failed."
+                    if password_changed
+                    else "Password change simulation succeeded, but the "
+                    "forced-change simulation failed."
+                )
                 raise PasswordChangeError(
-                    "Password changed, but forcing a change at next login failed.",
+                    failure_message,
                     details=_sanitize_details(
-                        {
-                            "username": username,
-                            "partial_success": True,
-                            "password_changed": True,
-                            "force_change_applied": False,
-                            "manual_intervention_required": True,
-                            "recommended_action": (
-                                f"Run chage -d 0 {username} "
-                                "after resolving the reported error."
-                            ),
-                            "primary_result": result.to_dict(),
-                            "secondary_error_type": type(exc).__name__,
-                            "secondary_error": getattr(exc, "details", {}),
-                        },
+                        failure_details,
                         sensitive_values=sensitive_values,
                     ),
                     cause=exc,
@@ -1464,11 +1493,10 @@ class LinuxPasswordManager:
         if administrative_target:
             impact = "high"
             warnings.append("Operation targets an administrative account.")
-        metadata = {
+        metadata: dict[str, Any] = {
             "action": action,
             "username": username,
             "secret_used": secret_used,
-            "secret": REDACTED_SECRET if secret_used else None,
             "policy": dict(policy or {}),
             "administrative_target": administrative_target,
             "allow_admin": allow_admin,
@@ -1477,6 +1505,8 @@ class LinuxPasswordManager:
             "reads_shadow_directly": False,
             "writes_shadow_directly": False,
         }
+        if secret_used:
+            metadata["secret"] = REDACTED_SECRET
 
         return _sanitize_details(metadata)
 

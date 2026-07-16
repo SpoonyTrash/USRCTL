@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Mapping, Any, Sequence
 from time import perf_counter
 
-from system.result import (
+from .result import (
   CommandResult,
   DryRunResult,
   ImpactLevel,
@@ -18,7 +18,7 @@ from system.result import (
   SimulationMetadata,
 )
 
-from utils.errors import (
+from ..utils.errors import (
   CommandExecutionError, 
   ResourceNotFoundError,
   InsufficientPermissionsError,
@@ -434,12 +434,15 @@ class CommandExecutor:
       stdin_sensitive: bool = True,
       **kwargs: Any,
   ) -> CommandResult | DryRunResult:
-    return self.execute(
-      command,
-      stdin_data=stdin_data,
-      stdin_sensitive=stdin_sensitive,
-      **kwargs
-    )
+    try:
+      return self.execute(
+        command,
+        stdin_data=stdin_data,
+        stdin_sensitive=stdin_sensitive,
+        **kwargs
+      )
+    finally:
+      stdin_data = ""
   
   def execute_quiet(self, command: Sequence[str] | str, **kwargs: Any) -> CommandResult | DryRunResult:
     return self.execute(command, capture_output=False, **kwargs)
