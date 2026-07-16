@@ -30,6 +30,14 @@ def _resolve_date_alias(
 
 @dataclass(slots=True, init=False)
 class PasswordStatusInfo:
+    """
+    Normalized password status information.
+
+    The legacy constructor arguments last_changed, password_expires,
+    password_inactive and account_expires are accepted temporarily for
+    compatibility. New code must use their *_at equivalents.
+    """
+
     username: str
     status: str = STATUS_UNKNOWN
     locked: bool = False
