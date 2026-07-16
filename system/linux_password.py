@@ -4,7 +4,7 @@ from typing import Any, Mapping, Sequence
 
 from .executor import CommandExecutor, ExecutorConfig
 from ..config import PasswordStrengthConfig
-from .result import ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
+from .result import ExecutionMetadata, ImpactLevel, ImpactMetadata, ResultStatus, SystemResult
 from ..models.policy import PasswordPolicy, PolicyOrigin, PolicyStatus
 from ..utils.errors import (
     AdministrativeAccountProtectionError,
@@ -64,6 +64,7 @@ from .password_constants import (
     ACTION_SET_PASSWORD_POLICY,
     ACTION_SET_PASSWORD_WARNING_DAYS,
     ACTION_UNLOCK_PASSWORD,
+    CMD_CHAGE,
     CMD_GETENT,
     REDACTED_SECRET,
     REQUIRED_COMMANDS,
@@ -427,7 +428,14 @@ class LinuxPasswordManager:
                 **result.details,
                 "action": ACTION_APPLY_GENERATED_PASSWORD,
                 "target_user": username,
-                "generated_password_applied": result.is_effectively_ok,
+                "generated_password_applied": (
+                    result.changed
+                    and not result.dry_run
+                ),
+                "generated_password_projected": (
+                    result.dry_run
+                    and result.is_effectively_ok
+                ),
                 "secret": REDACTED_SECRET,
                 "secret_redacted": True,
             },
@@ -693,8 +701,17 @@ class LinuxPasswordManager:
             status_result, CommandExecutionError, "Unable to query password status."
         )
         info = self._get_password_policy_for_existing_user(username)
+        status_execution = self._require_execution(
+            status_result,
+            username=username,
+            action=ACTION_QUERY_PASSWORD_STATUS,
+            message=(
+                "Password status command completed "
+                "without execution data."
+            ),
+        )
         technical_state = _normalize_password_state(
-            status_result.execution.stdout if status_result.execution else ""
+            status_execution.stdout
         )
         info.locked = technical_state == STATUS_LOCKED
         if info.locked:
@@ -725,10 +742,19 @@ class LinuxPasswordManager:
             CommandExecutionError,
             "Unable to query password aging information.",
         )
+        execution = self._require_execution(
+            result,
+            username=username,
+            action=ACTION_QUERY_PASSWORD_STATUS,
+            message=(
+                "Password aging command completed "
+                "without execution data."
+            ),
+        )
         try:
             return _parse_chage_output(
                 username,
-                result.execution.stdout if result.execution else "",
+                execution.stdout,
             )
         except CommandExecutionError:
             raise
@@ -1141,6 +1167,45 @@ class LinuxPasswordManager:
                 },
             )
 
+    def _require_execution(
+        self,
+        result: SystemResult,
+        *,
+        username: str,
+        action: str,
+        message: str,
+    ) -> ExecutionMetadata:
+        if result.execution is None:
+            raise CommandExecutionError(
+                message,
+                details={
+                    "username": username,
+                    "action": action,
+                    "result_status": str(result.status),
+                },
+            )
+
+        return result.execution
+
+    def _raise_for_known_command_failure(
+        self,
+        *,
+        command_name: str,
+        return_code: int | None,
+        details: dict[str, Any],
+    ) -> None:
+        if command_name != CMD_CHAGE:
+            return
+
+        if return_code == 15:
+            raise ResourceNotFoundError(
+                "Shadow password database is unavailable.",
+                details={
+                    **details,
+                    "resource": "/etc/shadow",
+                },
+            )
+
     def _raise_if_failed(
         self,
         result: SystemResult,
@@ -1189,7 +1254,6 @@ class LinuxPasswordManager:
 
         missing_command_markers = (
             "command not found",
-            "no such file or directory",
             "executable file not found",
         )
 
@@ -1205,6 +1269,13 @@ class LinuxPasswordManager:
             command_name = str(command[0])
         elif isinstance(command, str):
             command_name = command.split(maxsplit=1)[0] if command else ""
+
+        return_code = details.get("return_code")
+        self._raise_for_known_command_failure(
+            command_name=command_name,
+            return_code=return_code if isinstance(return_code, int) else None,
+            details=details,
+        )
 
         if (
             _stderr_reports_missing_user(stderr)
@@ -1248,7 +1319,7 @@ class LinuxPasswordManager:
                 "projected_changes": (changes if result.dry_run else []),
                 "secret": REDACTED_SECRET,
                 "secret_redacted": True,
-                "technical_layer": "system/linux_passwords.py",
+                "technical_layer": "system/linux_password.py",
             },
             sensitive_values=sensitive_values,
         )

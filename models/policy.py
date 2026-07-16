@@ -3,14 +3,14 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, Mapping, Self
 
-from utils.errors import (
+from ..utils.errors import (
     AccountExpirationError,
     InactivityPolicyError,
     LoginRestrictionError,
     PolicyError,
     ValidationError,
 )
-from utils.validators import validate_username
+from ..utils.validators import validate_username
 
 ADMIN_TARGET_NAME = frozenset({"root", "admin", "sudo", "wheel"})
 DEFAULT_INACTIVE_DAYS = 30

@@ -380,3 +380,220 @@ def test_every_public_export_exists() -> None:
 
     for exported_name in module.__all__:
         assert hasattr(module, exported_name)
+
+
+def test_query_expiration_command_uses_iso_chage_listing() -> None:
+    from USRCTL.system.linux_password import _build_query_expiration_command
+
+    assert _build_query_expiration_command("alice") == [
+        "chage",
+        "--list",
+        "--iso8601",
+        "alice",
+    ]
+
+
+def test_parse_chage_output_calculates_inactive_days_from_iso_dates() -> None:
+    from USRCTL.system.password_parsers import _parse_chage_output
+
+    info = _parse_chage_output(
+        "alice",
+        """
+Last password change                                    : 2026-07-01
+Password expires                                        : 2026-07-31
+Password inactive                                       : 2026-08-30
+Account expires                                         : never
+Minimum number of days between password change          : 0
+Maximum number of days between password change          : 30
+Number of days of warning before password expires       : 7
+""",
+    )
+
+    assert info.password_expires == "2026-07-31"
+    assert info.password_inactive_at == "2026-08-30"
+    assert info.account_expires is None
+    assert info.inactive_days == 30
+    assert info.to_policy_dict()["password_inactive_at"] == "2026-08-30"
+
+
+def test_parse_chage_output_does_not_invent_inactive_days_for_never() -> None:
+    from USRCTL.system.password_parsers import _parse_chage_output
+
+    info = _parse_chage_output(
+        "alice",
+        """
+Last password change                                    : 2026-07-01
+Password expires                                        : never
+Password inactive                                       : never
+Account expires                                         : never
+Minimum number of days between password change          : 0
+Maximum number of days between password change          : 99999
+Number of days of warning before password expires       : 7
+""",
+    )
+
+    assert info.password_expires is None
+    assert info.password_inactive_at is None
+    assert info.inactive_days is None
+
+
+def test_parse_chage_output_rejects_non_iso_dates() -> None:
+    from USRCTL.system.password_parsers import _parse_chage_output
+    from USRCTL.utils.errors import CommandExecutionError
+
+    with pytest.raises(CommandExecutionError):
+        _parse_chage_output(
+            "alice",
+            """
+Last password change                                    : Jul 01, 2026
+Password expires                                        : 2026-07-31
+Password inactive                                       : 2026-08-30
+Account expires                                         : never
+Minimum number of days between password change          : 0
+Maximum number of days between password change          : 30
+Number of days of warning before password expires       : 7
+""",
+        )
+
+
+def test_parse_chage_output_rejects_inactive_date_before_expiration() -> None:
+    from USRCTL.system.password_parsers import _parse_chage_output
+    from USRCTL.utils.errors import CommandExecutionError
+
+    with pytest.raises(CommandExecutionError):
+        _parse_chage_output(
+            "alice",
+            """
+Last password change                                    : 2026-07-01
+Password expires                                        : 2026-08-30
+Password inactive                                       : 2026-07-31
+Account expires                                         : never
+Minimum number of days between password change          : 0
+Maximum number of days between password change          : 30
+Number of days of warning before password expires       : 7
+""",
+        )
+
+
+def test_require_execution_rejects_successful_query_without_execution() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    result = SystemResult(
+        ok=True,
+        status=ResultStatus.SUCCESS,
+        action="query_password_status",
+        target="alice",
+        execution=None,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        manager._require_execution(
+            result,
+            username="alice",
+            action="query_password_status",
+            message="missing execution",
+        )
+
+    assert "missing execution" in str(exc_info.value)
+
+
+def test_raise_if_failed_classifies_chage_return_code_15_as_shadow_unavailable() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    result = SystemResult(
+        ok=False,
+        status=ResultStatus.FAILURE,
+        action="query_password_status",
+        target="alice",
+        execution=ExecutionMetadata(
+            command=["chage", "--list", "--iso8601", "alice"],
+            return_code=15,
+            stderr="cannot open shadow password file",
+        ),
+    )
+
+    with pytest.raises(ResourceNotFoundError) as exc_info:
+        manager._raise_if_failed(result, RuntimeError, "failed")
+
+    assert exc_info.value.details["resource"] == "/etc/shadow"
+
+
+def test_raise_if_failed_no_such_file_is_not_missing_command_marker() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    result = SystemResult(
+        ok=False,
+        status=ResultStatus.FAILURE,
+        action="query_password_status",
+        target="alice",
+        execution=ExecutionMetadata(
+            command=["chage", "--list", "--iso8601", "alice"],
+            return_code=1,
+            stderr="/etc/shadow: no such file or directory",
+        ),
+    )
+
+    with pytest.raises(PasswordChangeError):
+        manager._raise_if_failed(result, PasswordChangeError, "failed")
+
+
+def test_password_policy_inactive_days_interface_accepts_and_rejects_expected_values() -> None:
+    for value in (-1, 0, 30, None):
+        assert PasswordPolicy(inactive_days=value).inactive_days == value
+
+    for value in (True, -2, "30"):
+        with pytest.raises(ValidationError):
+            PasswordPolicy(inactive_days=value)  # type: ignore[arg-type]
+
+
+def test_linux_passwords_alias_exports_canonical_manager() -> None:
+    from USRCTL.system.linux_passwords import LinuxPasswordManager as AliasManager
+
+    assert AliasManager is LinuxPasswordManager
+
+
+def test_apply_generated_password_marks_real_apply_not_projection() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    manager.change_password = Mock(
+        return_value=SystemResult(
+            ok=True,
+            status=ResultStatus.SUCCESS,
+            action=ACTION_CHANGE_PASSWORD,
+            target="alice",
+            changed=True,
+            dry_run=False,
+            details={},
+        )
+    )
+
+    result = manager.apply_generated_password(
+        "alice",
+        "UniqueSecret-ABC123!",
+        dry_run=False,
+        allow_admin=True,
+    )
+
+    assert result.details["generated_password_applied"] is True
+    assert result.details["generated_password_projected"] is False
+
+
+def test_apply_generated_password_marks_dry_run_projection_not_apply() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    manager.change_password = Mock(
+        return_value=SystemResult(
+            ok=True,
+            status=ResultStatus.DRY_RUN,
+            action=ACTION_CHANGE_PASSWORD,
+            target="alice",
+            changed=False,
+            dry_run=True,
+            details={},
+        )
+    )
+
+    result = manager.apply_generated_password(
+        "alice",
+        "UniqueSecret-ABC123!",
+        dry_run=True,
+        allow_admin=True,
+    )
+
+    assert result.details["generated_password_applied"] is False
+    assert result.details["generated_password_projected"] is True

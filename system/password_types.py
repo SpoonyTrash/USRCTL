@@ -19,7 +19,7 @@ class PasswordStatusInfo:
     requires_change: bool = False
     last_changed: str | None = None
     password_expires: str | None = None
-    password_inactive: str | None = None
+    password_inactive_at: str | None = None
     account_expires: str | None = None
     minimum_days: int | None = None
     maximum_days: int | None = None
@@ -31,6 +31,9 @@ class PasswordStatusInfo:
         return {
             "target": self.username,
             "last_changed_at": self.last_changed,
+            "password_expires_at": self.password_expires,
+            "password_inactive_at": self.password_inactive_at,
+            "account_expires_at": self.account_expires,
             "min_password_age_days": self.minimum_days,
             "max_password_age_days": self.maximum_days,
             "warning_days": self.warning_days,
