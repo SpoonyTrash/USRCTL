@@ -186,29 +186,42 @@ def _normalize_password_policy_field(value: Any, *, field_name: str) -> int | No
 def _stderr_reports_missing_user(
     stderr: str,
 ) -> bool:
-    normalized = stderr.strip().lower()
+    normalized = " ".join(stderr.strip().lower().split())
 
-    exact_prefixes = (
-        "unknown user",
-        "user not found",
+    if not normalized:
+        return False
+
+    command_prefixes = (
+        "passwd:",
+        "chage:",
+        "usermod:",
+        "getent:",
+        "chpasswd:",
     )
 
-    if normalized.startswith(exact_prefixes):
-        return True
+    for prefix in command_prefixes:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].strip()
+            break
+
+    if normalized.startswith("unknown user:"):
+        username = normalized[len("unknown user:"):].strip()
+        return bool(username) and " " not in username
+
+    if normalized.startswith("unknown user "):
+        username = normalized[len("unknown user "):].strip(" '\"")
+        return bool(username) and " " not in username
+
+    if normalized.startswith("user not found:"):
+        username = normalized[len("user not found:"):].strip()
+        return bool(username) and " " not in username
 
     if (
         normalized.startswith("user ")
         and normalized.endswith(" does not exist")
     ):
-        middle = normalized[
-            len("user "):-len(" does not exist")
-        ].strip(" '\"")
-        return bool(middle) and " " not in middle
-
-    if ": user " in normalized:
-        return _stderr_reports_missing_user(
-            f"user {normalized.split(': user ', 1)[1]}"
-        )
+        username = normalized[len("user "):-len(" does not exist")].strip(" '\"")
+        return bool(username) and " " not in username
 
     return (
         "does not exist in /etc/passwd" in normalized
@@ -264,38 +277,16 @@ class LinuxPasswordManager:
             allow_admin=allow_admin,
         )
         if password is None:
-            if not effective_dry_run:
-                raise WeakPasswordError(
-                    "Password value is required.",
-                    details={
-                        "username": username,
-                        "password": REDACTED_SECRET,
-                    },
-                )
-        else:
-            _validate_password_transport(password)
-            _validate_password_strength(
-                username,
-                password,
-                self.password_strength,
+            raise WeakPasswordError(
+                "Password value is required.",
+                details={"username": username, "password": REDACTED_SECRET},
             )
+        _validate_password_transport(password)
+        _validate_password_strength(username, password, self.password_strength)
         self.ensure_operation_does_not_expose_secrets(_build_change_password_command())
-        if effective_dry_run:
-            stdin_data = ""
-        else:
-            if password is None:
-                raise WeakPasswordError(
-                    "Password value is required.",
-                    details={
-                        "username": username,
-                        "password": REDACTED_SECRET,
-                    },
-                )
-
-            stdin_data = _build_chpasswd_input(
-                username,
-                password,
-            )
+        stdin_data = (
+            "" if effective_dry_run else _build_chpasswd_input(username, password)
+        )
         result = self.executor.execute_with_stdin(
             _build_change_password_command(),
             stdin_data=stdin_data,
@@ -402,9 +393,9 @@ class LinuxPasswordManager:
             default=False,
         )
         effective_dry_run = self._effective_dry_run(dry_run)
-        if not effective_dry_run and not generated_password:
+        if not generated_password:
             raise WeakPasswordError(
-                "Generated password is required outside dry-run.",
+                "Generated password is required.",
                 details={"username": username, "password": REDACTED_SECRET},
             )
         sensitive_values = (generated_password,) if generated_password else ()
@@ -700,7 +691,6 @@ class LinuxPasswordManager:
         self._raise_if_failed(
             status_result, CommandExecutionError, "Unable to query password status."
         )
-        info = self._get_password_policy_for_existing_user(username)
         status_execution = self._require_execution(
             status_result,
             username=username,
@@ -713,6 +703,7 @@ class LinuxPasswordManager:
         technical_state = _normalize_password_state(
             status_execution.stdout
         )
+        info = self._get_password_policy_for_existing_user(username)
         info.locked = technical_state == STATUS_LOCKED
         if info.locked:
             info.status = STATUS_LOCKED
@@ -775,7 +766,7 @@ class LinuxPasswordManager:
         return self._get_password_policy_for_existing_user(username)
 
     def get_last_password_change(self, username: str) -> str | None:
-        return self.get_password_policy(username).last_changed
+        return self.get_password_policy(username).last_changed_at
 
     def get_max_password_days(self, username: str) -> int | None:
         return self.get_password_policy(username).maximum_days
@@ -796,7 +787,7 @@ class LinuxPasswordManager:
             max_password_age_days=info.maximum_days,
             warning_days=info.warning_days,
             inactive_days=info.inactive_days,
-            last_changed_at=info.last_changed,
+            last_changed_at=info.last_changed_at,
             force_password_change=info.requires_change,
             password_expired=info.expired,
             status=PolicyStatus.ACTIVE,
@@ -1281,9 +1272,7 @@ class LinuxPasswordManager:
             _stderr_reports_missing_user(stderr)
             or (
                 command_name == CMD_GETENT
-                and result.execution is not None
-                and result.execution.return_code not in (None, 0)
-                and not stderr
+                and return_code == 2
             )
         ):
             raise UserNotFoundError(
