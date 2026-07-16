@@ -10,14 +10,29 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from USRCTL.system.executor import CommandExecutor, ExecutorConfig
+from USRCTL.models.policy import PasswordPolicy
 from USRCTL.system.linux_password import (
     ACTION_CHANGE_PASSWORD,
     ACTION_QUERY_USER_IDENTITY,
     LinuxPasswordManager,
+    PasswordStatusInfo,
+    _build_aging_command,
+    _sanitize_details,
     _split_sensitive_option,
 )
-from USRCTL.system.result import ExecutionMetadata, ResultStatus, SystemResult
-from USRCTL.utils.errors import ResourceNotFoundError, UserNotFoundError, ValidationError
+from USRCTL.system.result import (
+    ExecutionMetadata,
+    ImpactLevel,
+    ImpactMetadata,
+    ResultStatus,
+    SystemResult,
+)
+from USRCTL.utils.errors import (
+    PasswordChangeError,
+    ResourceNotFoundError,
+    UserNotFoundError,
+    ValidationError,
+)
 
 
 class FakeExecutor:
@@ -37,6 +52,10 @@ class FakeExecutor:
                     action=action,
                     target=target,
                     message="missing",
+                    execution=ExecutionMetadata(
+                        command=list(command),
+                        return_code=2,
+                    ),
                 )
             return SystemResult(
                 ok=True,
@@ -127,6 +146,54 @@ def test_raise_if_failed_classifies_missing_user() -> None:
         manager._raise_if_failed(result, RuntimeError, "failed")
 
 
+def test_raise_if_failed_does_not_classify_generic_does_not_exist_as_missing_user() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    result = SystemResult(
+        ok=False,
+        status=ResultStatus.FAILURE,
+        action="set_password_policy",
+        target="alice",
+        execution=ExecutionMetadata(
+            command=["chage", "alice"],
+            return_code=1,
+            stderr="configuration file does not exist",
+        ),
+    )
+
+    with pytest.raises(PasswordChangeError):
+        manager._raise_if_failed(result, PasswordChangeError, "failed")
+
+
+def test_password_policy_preserves_inactive_days_in_model_and_command() -> None:
+    manager = LinuxPasswordManager(executor=FakeExecutor(), dry_run=True)
+    manager.get_password_policy = Mock(
+        return_value=PasswordStatusInfo(
+            username="alice",
+            minimum_days=0,
+            maximum_days=90,
+            warning_days=7,
+            inactive_days=30,
+        )
+    )
+
+    model = manager.build_password_policy_model("alice")
+
+    assert model.inactive_days == 30
+    assert _build_aging_command("alice", **manager._policy_values(model)) == [
+        "chage",
+        "-m",
+        "0",
+        "-M",
+        "90",
+        "-W",
+        "7",
+        "-I",
+        "30",
+        "alice",
+    ]
+    assert PasswordPolicy(inactive_days=30).inactive_days == 30
+
+
 def test_split_sensitive_option_preserves_option_case_and_value_after_equals() -> None:
     assert _split_sensitive_option("--Password=AbC=123") == ("--Password", "AbC=123")
 
@@ -140,6 +207,47 @@ def test_execution_metadata_is_mutable_for_safe_sanitization() -> None:
     assert execution.command == ["echo", "[REDACTED]"]
     assert execution.stdout == "[REDACTED]"
     assert execution.stderr == "[REDACTED]"
+
+
+def test_system_result_and_impact_metadata_are_mutable_for_safe_sanitization() -> None:
+    result = SystemResult(
+        ok=True,
+        status=ResultStatus.SUCCESS,
+        action="original",
+        message="before",
+        details={"before": True},
+        impact=ImpactMetadata(level=ImpactLevel.LOW),
+    )
+
+    result.action = "updated"
+    result.message = "after"
+    result.details = {"after": True}
+    result.impact.level = ImpactLevel.HIGH
+
+    assert result.action == "updated"
+    assert result.message == "after"
+    assert result.details == {"after": True}
+    assert result.impact.level is ImpactLevel.HIGH
+
+
+def test_sanitize_details_converts_sets_to_sorted_lists() -> None:
+    sanitized = _sanitize_details({"values": {"b", "a"}})
+
+    assert json.dumps(sanitized, default=str)
+    assert sanitized["values"] == ["a", "b"]
+
+
+def test_sanitize_details_limits_deep_recursion() -> None:
+    details = current = {}
+    for index in range(25):
+        next_value = {}
+        current[f"level_{index}"] = next_value
+        current = next_value
+
+    sanitized = _sanitize_details(details)
+
+    serialized = json.dumps(sanitized, default=str)
+    assert "[MAX_DEPTH_REACHED]" in serialized
 
 
 def test_execute_with_stdin_contract_does_not_serialize_secret() -> None:
