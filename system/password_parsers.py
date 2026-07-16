@@ -136,9 +136,28 @@ def _calculate_inactive_days(
     return inactive_days
 
 
+def _is_password_expired(
+    password_expires_at: str | None,
+    *,
+    today: date | None = None,
+) -> bool:
+    if password_expires_at is None:
+        return False
+
+    if password_expires_at == EXPIRE_IMMEDIATELY_VALUE:
+        return True
+
+    reference_date = today or date.today()
+    expiration_date = date.fromisoformat(password_expires_at)
+
+    return expiration_date < reference_date
+
+
 def _parse_chage_output(
     username: str,
     output: str,
+    *,
+    today: date | None = None,
 ) -> PasswordStatusInfo:
     fields: dict[str, Any] = {}
     name_map = {
@@ -199,18 +218,18 @@ def _parse_chage_output(
         password_inactive_at,
     )
     expired = (
-        password_expires_at == EXPIRE_IMMEDIATELY_VALUE
-        or last_changed_at == EXPIRE_IMMEDIATELY_VALUE
+        last_changed_at == EXPIRE_IMMEDIATELY_VALUE
+        or _is_password_expired(password_expires_at, today=today)
     )
     return PasswordStatusInfo(
         username=username,
         status=(STATUS_EXPIRED if expired else STATUS_ACTIVE),
         expired=expired,
         requires_change=expired,
-        last_changed=last_changed_at,
-        password_expires=password_expires_at,
+        last_changed_at=last_changed_at,
+        password_expires_at=password_expires_at,
         password_inactive_at=password_inactive_at,
-        account_expires=account_expires_at,
+        account_expires_at=account_expires_at,
         minimum_days=minimum_days,
         maximum_days=maximum_days,
         warning_days=warning_days,

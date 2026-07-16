@@ -409,9 +409,9 @@ Number of days of warning before password expires       : 7
 """,
     )
 
-    assert info.password_expires == "2026-07-31"
+    assert info.password_expires_at == "2026-07-31"
     assert info.password_inactive_at == "2026-08-30"
-    assert info.account_expires is None
+    assert info.account_expires_at is None
     assert info.inactive_days == 30
     assert info.to_policy_dict()["password_inactive_at"] == "2026-08-30"
 
@@ -432,7 +432,7 @@ Number of days of warning before password expires       : 7
 """,
     )
 
-    assert info.password_expires is None
+    assert info.password_expires_at is None
     assert info.password_inactive_at is None
     assert info.inactive_days is None
 
@@ -538,7 +538,7 @@ def test_password_policy_inactive_days_interface_accepts_and_rejects_expected_va
     for value in (-1, 0, 30, None):
         assert PasswordPolicy(inactive_days=value).inactive_days == value
 
-    for value in (True, -2, "30"):
+    for value in (True, False, -2, "30", 30.5):
         with pytest.raises(ValidationError):
             PasswordPolicy(inactive_days=value)  # type: ignore[arg-type]
 

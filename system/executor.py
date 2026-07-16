@@ -320,7 +320,7 @@ class CommandExecutor:
     if stdin_data is not None:
       audit_details.update(
         {
-          "stdin_supplied": bool(stdin_data),
+          "stdin_supplied": True,
           "stdin_sensitive": stdin_sensitive
         }
       )
