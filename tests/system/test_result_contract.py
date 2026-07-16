@@ -5,6 +5,7 @@ from USRCTL.system.result import (
     ResultStatus,
     SystemResult,
 )
+from USRCTL.system.linux_password import LinuxPasswordManager
 
 
 def test_password_manager_result_fields_are_mutable() -> None:
@@ -34,3 +35,22 @@ def test_password_manager_result_fields_are_mutable() -> None:
     assert result.execution.stdout == "new stdout"
     assert result.execution.stderr == "new stderr"
     assert result.impact.level == ImpactLevel.HIGH
+
+
+def test_require_execution_returns_execution_type() -> None:
+    manager = LinuxPasswordManager(dry_run=True)
+    successful_result = SystemResult(
+        ok=True,
+        status=ResultStatus.SUCCESS,
+        action="test",
+        execution=ExecutionMetadata(command=["getent"]),
+    )
+
+    execution = manager._require_execution(
+        successful_result,
+        username="alice",
+        action="test",
+        message="Missing execution.",
+    )
+
+    assert execution is successful_result.execution
