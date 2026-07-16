@@ -1,12 +1,27 @@
 from typing import Any
 
 from ..utils.errors import CommandExecutionError, PolicyError
+from .password_constants import (
+    CHAGE_ACCOUNT_EXPIRES,
+    CHAGE_EXPECTED_FIELDS,
+    CHAGE_LAST_CHANGE,
+    CHAGE_MAX_DAYS,
+    CHAGE_MIN_DAYS,
+    CHAGE_PASSWORD_EXPIRES,
+    CHAGE_PASSWORD_INACTIVE,
+    CHAGE_WARNING_DAYS,
+    EXPIRE_IMMEDIATELY_VALUE,
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    STATUS_LOCKED,
+    STATUS_NO_PASSWORD,
+    STATUS_UNKNOWN,
+)
 from .password_sanitizer import _sanitize_details
+from .password_types import PasswordStatusInfo
 
 
 def _normalize_password_state(value: str | None) -> str:
-    from .linux_password import STATUS_ACTIVE, STATUS_LOCKED, STATUS_NO_PASSWORD, STATUS_UNKNOWN
-
     text = (value or "").strip()
 
     if not text:
@@ -32,8 +47,6 @@ def _normalize_password_state(value: str | None) -> str:
 
 
 def _normalize_chage_date(value: str | None) -> str | None:
-    from .linux_password import EXPIRE_IMMEDIATELY_VALUE
-
     text = (value or "").strip()
     if not text or text.lower() in {"never", "none"}:
         return None
@@ -68,22 +81,10 @@ def _normalize_policy_days(
     return days
 
 
-def _parse_chage_output(username: str, output: str):
-    from .linux_password import (
-        CHAGE_ACCOUNT_EXPIRES,
-        CHAGE_EXPECTED_FIELDS,
-        CHAGE_LAST_CHANGE,
-        CHAGE_MAX_DAYS,
-        CHAGE_MIN_DAYS,
-        CHAGE_PASSWORD_EXPIRES,
-        CHAGE_PASSWORD_INACTIVE,
-        CHAGE_WARNING_DAYS,
-        EXPIRE_IMMEDIATELY_VALUE,
-        PasswordStatusInfo,
-        STATUS_ACTIVE,
-        STATUS_EXPIRED,
-    )
-
+def _parse_chage_output(
+    username: str,
+    output: str,
+) -> PasswordStatusInfo:
     fields: dict[str, Any] = {}
     name_map = {
         "last password change": CHAGE_LAST_CHANGE,
@@ -116,17 +117,13 @@ def _parse_chage_output(username: str, output: str):
     minimum_days = _normalize_policy_days(
         fields[CHAGE_MIN_DAYS], field_name=CHAGE_MIN_DAYS, allow_never=False
     )
-
     maximum_days = _normalize_policy_days(
         fields[CHAGE_MAX_DAYS], field_name=CHAGE_MAX_DAYS, allow_never=True
     )
-
     warning_days = _normalize_policy_days(
         fields[CHAGE_WARNING_DAYS], field_name=CHAGE_WARNING_DAYS, allow_never=False
     )
-
     inactive_raw = str(fields[CHAGE_PASSWORD_INACTIVE]).strip()
-
     inactive_days = (
         None
         if inactive_raw.lower() in {"", "never"}
